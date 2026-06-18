@@ -6,6 +6,8 @@ This repository contains the viewer, tile generators, notebook helpers, and MCP
 server. It does not contain generated tile pyramids or DEM source data. A new
 user must generate or convert local datasets before the map can show data.
 
+![Earth elevation nside 8192 around Japan](docs/images/earth-elevation-japan-n8192.png)
+
 ## Features
 
 - `hpxmap-v1` directory tile format for HEALPix scalar maps.

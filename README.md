@@ -16,8 +16,8 @@ user must generate or convert local datasets before the map can show data.
 - Float32, uint16, and int16 scalar tiles.
 - Shader-side colormap, min/max, linear/log/symlog scaling, and relief shading.
 - Camera/view-state panel with reusable `view_state.json`, copyable
-  JSON/URL/Python, globe coordinate axes, graticule, scale bar, and PNG/JPG
-  export.
+  JSON/URL/Python, globe coordinate axes, graticule, scale bar, PNG/JPG export,
+  and headless `hpxviewer-export` rendering.
 - Hover inspector for HEALPix cell, face-local coordinates, lon/lat, value, and
   source tile.
 - Right-drag tile painting. The viewer returns compact HEALPix `tileRanges` and
@@ -292,15 +292,38 @@ v = Viewer(
 
 v.save_image(
     "earth-elevation.png",
-    mode="figure",
+    mode="active",
     width=1800,
     height=1200,
     embed_metadata=True,
 )
 ```
 
-`save_image()` requires Chrome or Chromium on the machine running Python. Set
-`CHROME_BIN=/path/to/chrome` or pass `chrome=...` if it is not on `PATH`.
+For reproducible figures, save the current scene from the viewer with
+`View` -> `Save JSON`, then render that file without opening the interactive UI:
+
+```sh
+hpxviewer-export view_state.json figure.png
+```
+
+The command starts or reuses the local viewer server on `127.0.0.1:4181`, opens
+the saved state in headless Chrome, waits for tiles to settle, and writes the
+same PNG/JPG output path used by the interactive export dialog. Export settings
+stored in `view_state.json` are honored by default. Override them when needed:
+
+```sh
+hpxviewer-export view_state.json figure.png \
+  --mode split \
+  --width 2400 \
+  --height 1400 \
+  --scale 2
+```
+
+Use `--base-url http://127.0.0.1:4181/` when a viewer server is already running
+at a specific URL. `save_image()` and `hpxviewer-export` require Chrome or
+Chromium on the machine running Python. Set `CHROME_BIN=/path/to/chrome`, pass
+`chrome=...`, or use `hpxviewer-export --chrome /path/to/chrome` if it is not on
+`PATH`.
 
 ## Notebook Workflow
 

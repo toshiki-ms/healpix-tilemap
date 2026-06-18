@@ -17,5 +17,8 @@ analysis = ["numpy", "pandas"]
 generators = ["numpy", "zarr>=3", "healpy", "rasterio"]
 all = ["ipython", "numpy", "zarr>=3", "pandas", "healpy", "rasterio"]
 
+[project.scripts]
+hpxviewer-export = "hpxviewer.export_cli:main"
+
 [tool.setuptools.packages.find]
 where = ["."]

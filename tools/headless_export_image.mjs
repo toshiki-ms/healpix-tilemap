@@ -13,10 +13,20 @@ main().catch((error) => {
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
-  if (!args.url || !args.output) {
-    throw new Error("Usage: headless_export_image.mjs --url URL --output FILE [--mode figure] [--format png]");
+  const positionals = args._ ?? [];
+  const positionalViewState = positionals.length >= 2 && /\.json$/i.test(String(positionals[0])) ? positionals[0] : null;
+  const viewStatePath = args["view-state"] ?? args.viewState ?? (
+    positionalViewState
+  );
+  const outputArg = args.output ?? (positionalViewState ? positionals[1] : positionals[0]);
+  if (!outputArg) {
+    throw new Error(
+      "Usage: headless_export_image.mjs [--url URL] [--view-state FILE] --output FILE [--mode active] [--format png]\n" +
+      "       headless_export_image.mjs view_state.json figure.png"
+    );
   }
-  const output = path.resolve(String(args.output));
+  const viewState = viewStatePath ? readViewState(viewStatePath) : null;
+  const output = path.resolve(String(outputArg));
   const format = normalizeFormat(args.format ?? path.extname(output).slice(1) ?? "png");
   const viewportWidth = positiveInteger(args.viewportWidth ?? args["viewport-width"] ?? 1280);
   const viewportHeight = positiveInteger(args.viewportHeight ?? args["viewport-height"] ?? 900);
@@ -50,17 +60,14 @@ async function main() {
     page = await connectCdp(target.webSocketDebuggerUrl);
     await page.send("Page.enable");
     await page.send("Runtime.enable");
-    await page.send("Page.navigate", { url: withDebugParam(String(args.url)) });
+    await page.send("Page.navigate", { url: withDebugParam(initialUrl(args.url, viewState)) });
     await waitForViewer(page, timeoutMs);
-    const exportResult = await evaluate(page, exportExpression({
-      mode: args.mode ?? "figure",
-      format,
-      scale: Number(args.scale ?? 1),
-      width: optionalPositiveInteger(args.width),
-      height: optionalPositiveInteger(args.height),
-      transparent: Boolean(args.transparent),
-      embedMetadata: args.metadata !== false && args["no-metadata"] !== true
-    }), timeoutMs);
+    if (viewState) {
+      await evaluate(page, applyViewStateExpression(viewState), timeoutMs);
+      await waitForViewer(page, timeoutMs);
+    }
+    const exportOptions = exportOptionsFromArgs(args, viewState, format);
+    const exportResult = await evaluate(page, exportExpression(exportOptions), timeoutMs);
     const dataUrl = exportResult.dataUrl;
     if (typeof dataUrl !== "string" || !dataUrl.startsWith("data:")) {
       throw new Error("Viewer did not return an image data URL.");
@@ -85,14 +92,15 @@ async function main() {
 }
 
 function parseArgs(argv) {
-  const args = {};
+  const args = { _: [] };
   for (let i = 0; i < argv.length; i += 1) {
     const item = argv[i];
     if (!item.startsWith("--")) {
+      args._.push(item);
       continue;
     }
     const key = item.slice(2);
-    if (key === "transparent" || key === "no-metadata") {
+    if (key === "transparent" || key === "no-transparent" || key === "metadata" || key === "no-metadata") {
       args[key] = true;
       continue;
     }
@@ -105,6 +113,75 @@ function parseArgs(argv) {
     i += 1;
   }
   return args;
+}
+
+function readViewState(viewStatePath) {
+  const resolved = path.resolve(String(viewStatePath));
+  try {
+    const parsed = JSON.parse(fs.readFileSync(resolved, "utf8"));
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new Error("Expected a JSON object.");
+    }
+    return parsed;
+  } catch (error) {
+    throw new Error(`Could not read view state ${resolved}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+function initialUrl(rawUrl, viewState) {
+  if (rawUrl) {
+    return String(rawUrl);
+  }
+  if (!viewState) {
+    throw new Error("Pass --url when exporting without a view-state file.");
+  }
+  const url = new URL("http://127.0.0.1:4181/");
+  const leftPane = viewState.panes?.left;
+  const rightPane = viewState.panes?.right;
+  const datasetId = viewState.datasetId ?? viewState.dataset ?? leftPane?.datasetId ?? leftPane?.dataset;
+  if (datasetId) {
+    url.searchParams.set("dataset", String(datasetId));
+  }
+  const rightDatasetId = rightPane?.datasetId ?? rightPane?.dataset;
+  if (rightDatasetId) {
+    url.searchParams.set("rightDataset", String(rightDatasetId));
+  }
+  const split = viewState.splitMode ?? viewState.split;
+  if (split) {
+    url.searchParams.set("split", String(split));
+  }
+  return url.href;
+}
+
+function exportOptionsFromArgs(args, viewState, format) {
+  const stateExport = viewState?.export && typeof viewState.export === "object" ? viewState.export : {};
+  const mode = normalizeExportMode(args.mode ?? stateExport.mode ?? viewState?.exportMode ?? "active");
+  const transparent = args["no-transparent"]
+    ? false
+    : args.transparent
+      ? true
+      : Boolean(stateExport.transparent ?? viewState?.exportTransparent);
+  const embedMetadata = args["no-metadata"]
+    ? false
+    : args.metadata
+      ? true
+      : stateExport.embedMetadata !== false && viewState?.exportEmbedMetadata !== false;
+  return {
+    mode,
+    format,
+    scale: Number(args.scale ?? stateExport.scale ?? viewState?.exportScale ?? 1),
+    width: optionalPositiveInteger(args.width ?? stateExport.width ?? viewState?.exportWidth),
+    height: optionalPositiveInteger(args.height ?? stateExport.height ?? viewState?.exportHeight),
+    transparent,
+    embedMetadata
+  };
+}
+
+function normalizeExportMode(value) {
+  if (value === "figure" || value === "map" || value === undefined || value === null || value === "") {
+    return "active";
+  }
+  return ["active", "left", "right", "split"].includes(value) ? value : "active";
 }
 
 function normalizeFormat(value) {
@@ -270,6 +347,10 @@ async function evaluate(page, expression, timeoutMs) {
 
 function exportExpression(options) {
   return `window.__hpxApp.exportImageDataUrl(${JSON.stringify(options)})`;
+}
+
+function applyViewStateExpression(viewState) {
+  return `window.__hpxApp.setViewState(${JSON.stringify(viewState)})`;
 }
 
 function delay(ms) {

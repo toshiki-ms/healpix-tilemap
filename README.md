@@ -382,6 +382,31 @@ v.show(iframe=False)
 Open the displayed link in a separate tab. The tab posts selection updates back
 to the original notebook output panel.
 
+Notebook viewers can round-trip the same `view_state.json` schema used by the
+browser UI:
+
+```python
+state = v.view_state()
+
+v2 = Viewer.from_view_state(state)
+v2.show()
+```
+
+`state` is a plain dictionary, so it can be saved and loaded with `json`:
+
+```python
+import json
+
+with open("view_state.json", "w") as file:
+    json.dump(v.view_state(), file, indent=2)
+
+with open("view_state.json") as file:
+    restored = Viewer.from_view_state(json.load(file))
+
+restored.show()
+restored.save_image("restored-view.png")
+```
+
 Point selection:
 
 ```python

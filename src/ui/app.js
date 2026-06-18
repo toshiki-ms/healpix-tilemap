@@ -114,6 +114,19 @@ export class App {
     if (this.debugPanel) {
       this.root.appendChild(this.debugPanel.element);
     }
+    window.addEventListener("message", (event) => {
+      if (event.data?.type !== "hpxviewer:setViewState" || !event.data.payload) {
+        return;
+      }
+      Promise.resolve(this.setViewState(event.data.payload))
+        .then(() => {
+          const targetOrigin = event.origin && event.origin !== "null" ? event.origin : "*";
+          event.source?.postMessage({ type: "hpxviewer:viewStateApplied" }, targetOrigin);
+        })
+        .catch((error) => {
+          console.warn("Could not apply posted view state.", error);
+        });
+    });
   }
 
   async start() {

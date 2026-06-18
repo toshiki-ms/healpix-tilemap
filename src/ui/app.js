@@ -371,7 +371,6 @@ npm run dev</pre>
       this.state.maxOrder = Number(this.controls.orderSelect.value);
       const minOrder = this.manifest.minOrder ?? this.manifest.tileShift;
       this.state.order = clampOrder(this.state.order, minOrder, this.state.maxOrder);
-      this.applyLinkedPaneState("maxOrder", this.state.maxOrder);
       this.writeUrlState();
     });
     this.controls.colormapSelect.addEventListener("change", () => {
@@ -670,6 +669,8 @@ npm run dev</pre>
       graticule: previous.graticule,
       scaleBar: previous.scaleBar,
       viewPanel: previous.viewPanel,
+      maxOrder: previous.maxOrder,
+      order: previous.order,
       exportEmbedMetadata: previous.exportEmbedMetadata,
       exportMode: previous.exportMode,
       exportScale: previous.exportScale,
@@ -692,8 +693,6 @@ npm run dev</pre>
       }
       this.assignResourceToPane(pane, sourcePane.resource, {
         layerId: sourcePane.state.layerId,
-        maxOrder: sourcePane.state.maxOrder,
-        order: sourcePane.state.order,
         min: sourcePane.state.min,
         max: sourcePane.state.max,
         relief: sourcePane.state.relief,
@@ -755,15 +754,6 @@ npm run dev</pre>
       for (const pane of this.panes) {
         if (pane.id !== this.activePaneId) {
           pane.state.view = value;
-        }
-      }
-    }
-    if (key === "maxOrder" && this.linkDataset) {
-      for (const pane of this.panes) {
-        if (pane.id !== this.activePaneId) {
-          const minOrder = pane.manifest.minOrder ?? pane.manifest.tileShift;
-          pane.state.maxOrder = clampOrder(Number(value), minOrder, pane.manifest.maxOrder);
-          pane.state.order = clampOrder(pane.state.order, minOrder, pane.state.maxOrder);
         }
       }
     }

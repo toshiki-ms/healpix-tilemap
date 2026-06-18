@@ -15,6 +15,9 @@ user must generate or convert local datasets before the map can show data.
 - Zoom-driven LOD selection with parent-tile fallback.
 - Float32, uint16, and int16 scalar tiles.
 - Shader-side colormap, min/max, linear/log/symlog scaling, and relief shading.
+- Camera/view-state panel with reusable `view_state.json`, copyable
+  JSON/URL/Python, globe coordinate axes, graticule, scale bar, PNG/JPG export,
+  and headless `hpxviewer-export` rendering.
 - Hover inspector for HEALPix cell, face-local coordinates, lon/lat, value, and
   source tile.
 - Right-drag tile painting. The viewer returns compact HEALPix `tileRanges` and
@@ -153,7 +156,9 @@ quantize-max = 9000
 
 The generator samples the raster with periodic longitude, clamped latitude, and
 bicubic interpolation. Different global DEM rasters can be used by calling
-`tools/make_earth_elevation.py` directly with `--source`.
+`tools/make_earth_elevation.py` directly with `--source`. The generated manifest
+sets `body.radiusKm` to Earth's mean radius, so globe scale bars are labeled in
+physical distance.
 
 ## Run The Viewer
 
@@ -182,6 +187,167 @@ npm run validate:generated
 
 `npm run test` does not require generated datasets. `validate:generated` checks
 tile files under `public/datasets/*/manifest.json`.
+
+## View State And Figure Export
+
+The toolbar `View` button opens a panel for camera and figure controls. In the
+3D globe view, the panel shows the camera position, target, current center
+longitude/latitude, and the center HEALPix/geographic vector. Enter `Lon`,
+`Lat`, `Distance`, and `FOV` to set the camera; the fields apply on Enter or
+when the field changes focus. `FOV` is limited to `179.9` degrees because an
+exact 180-degree perspective projection is singular.
+
+`JSON` copies the current view state, and `URL` copies a shareable URL that
+includes dataset, layer, order, colormap, scale, camera, axes, graticule, scale
+bar, north-up, split layout, and panel state. Paste edited JSON into the panel
+and press `Apply JSON` to restore a view.
+
+`Save JSON` writes the same state as a standalone scene file. The file uses
+`schema: "healpix-tilemap.view-state.v1"` and includes the active pane, split
+mode, overview/footprint state, per-pane dataset/layer/color/camera settings,
+net pan/zoom transforms, and export options such as target pane, output scale,
+width/height, transparency, and metadata embedding. `Load JSON` reads such a
+file back into the viewer, so a saved `view_state.json` is the preferred way to
+reproduce a figure setup.
+
+`Python` copies a notebook-ready snippet using the existing helper API:
+
+```python
+from hpxviewer import Viewer
+
+v = Viewer(
+    "earth-elevation-n8192",
+    layer="elevation_m",
+    view="globe",
+    order=13,
+    cmap="turbo",
+    scale="symlog",
+).set(
+    camera="...",
+    axes=True,
+    graticule=True,
+)
+v.show()
+```
+
+The `Axes` toolbar button overlays `+X/-X`, `+Y/-Y`, and `+Z/-Z` axes in the
+viewer-facing Z-up coordinate system. `+Z` points to the north pole. The
+low-level projection code stores spherical vectors internally with the second
+component as north, but the UI, camera panel, copied view state, and axis labels
+use display XYZ with `+Z` north to avoid exposing that implementation detail.
+
+Additional globe overlays:
+
+```text
+North     checkbox; keep local geographic north oriented upward at the view center
+Graticule checkbox; draw longitude/latitude guide lines
+Scale     checkbox; show a dataset-aware scale bar at the view center
+```
+
+The scale bar uses `manifest.body.radiusKm` when present. Datasets with a
+physical radius are labeled in `km`/`m`; datasets without one are labeled in
+angular distance (`deg`, `arcmin`, or `arcsec`) so the viewer does not imply an
+Earth-sized body for abstract maps.
+
+The `Save Image` button opens an export dialog where the file name, format,
+target, output scale, explicit width/height, PNG transparency, and metadata
+embedding can be confirmed before saving. The export dialog writes local files
+from the current view:
+
+```text
+Active pane          active pane plus colorbar
+Left / top pane      left or top pane plus colorbar
+Right / bottom pane  right or bottom pane plus colorbar
+Split panes          both panes as one figure
+```
+
+PNG and JPG exports support 1x, 2x, and 4x output scale. Set `Width` and/or
+`Height` to force an exact output size; blank fields use the current canvas size
+times the selected scale. The export dialog's `Transparent PNG` option removes
+the viewer background color from PNG output. `Embed metadata` stores the
+dataset, layer, camera, and view-state JSON inside PNG `iTXt` metadata or JPG
+XMP.
+
+The Python helper can save a figure without showing a browser window. It starts
+or reuses the local viewer server, opens the viewer in headless Chrome, and uses
+the same export path as the interactive dialog:
+
+```python
+from hpxviewer import Viewer
+
+v = Viewer(
+    "earth-elevation-n8192",
+    layer="elevation_m",
+    view="globe",
+    order=13,
+    cmap="turbo",
+    scale="symlog",
+).set(
+    axes=True,
+    north=True,
+    graticule=True,
+    scalebar=True,
+    camera="1.701158,0.085457,2.857535,0.628908,-0.634961,2.287902,175.4",
+)
+
+v.save_image(
+    "earth-elevation.png",
+    mode="active",
+    width=1800,
+    height=1200,
+    embed_metadata=True,
+)
+```
+
+For reproducible figures, save the current scene from the viewer with
+`View` -> `Save JSON`, then render that file without opening the interactive UI:
+
+```sh
+hpxviewer-export view_state.json figure.png
+```
+
+The command starts or reuses the local viewer server on `127.0.0.1:4181`, opens
+the saved state in headless Chrome, waits for tiles to settle, and writes the
+same PNG/JPG output path used by the interactive export dialog. Export settings
+stored in `view_state.json` are honored by default. Override them when needed:
+
+```sh
+hpxviewer-export view_state.json figure.png \
+  --mode split \
+  --width 2400 \
+  --height 1400 \
+  --scale 2
+```
+
+Use `--base-url http://127.0.0.1:4181/` when a viewer server is already running
+at a specific URL. `save_image()` and `hpxviewer-export` require Chrome or
+Chromium on the machine running Python. Set `CHROME_BIN=/path/to/chrome`, pass
+`chrome=...`, or use `hpxviewer-export --chrome /path/to/chrome` if it is not on
+`PATH`.
+
+## Tile And LOD Diagnostics
+
+Add `debug=1` to the viewer URL to enable diagnostics that are hidden in normal
+use:
+
+```text
+http://127.0.0.1:4181/?dataset=earth-elevation-n8192&debug=1
+```
+
+Debug mode adds a small `Tile/LOD Debug` panel and exposes the same structured
+snapshot in the browser console:
+
+```js
+window.__hpxApp.tileDiagnostics()
+// or
+window.__hpxTileDiagnostics()
+```
+
+The snapshot reports, per visible pane, the LOD decision, requested target
+tiles, parent-tile requests, exact/fallback/missing render counts, cache hits,
+pending/queued requests, and recent tile load times. This is intended for
+checking whether a high-order view is really drawing exact tiles or silently
+falling back to parent tiles.
 
 ## Notebook Workflow
 
@@ -215,6 +381,31 @@ v.show(iframe=False)
 
 Open the displayed link in a separate tab. The tab posts selection updates back
 to the original notebook output panel.
+
+Notebook viewers can round-trip the same `view_state.json` schema used by the
+browser UI:
+
+```python
+state = v.view_state()
+
+v2 = Viewer.from_view_state(state)
+v2.show()
+```
+
+`state` is a plain dictionary, so it can be saved and loaded with `json`:
+
+```python
+import json
+
+with open("view_state.json", "w") as file:
+    json.dump(v.view_state(), file, indent=2)
+
+with open("view_state.json") as file:
+    restored = Viewer.from_view_state(json.load(file))
+
+restored.show()
+restored.save_image("restored-view.png")
+```
 
 Point selection:
 
@@ -354,8 +545,13 @@ npm run convert:hpx -- \
   --default-view globe \
   --colormap viridis \
   --scale symlog \
+  --body-name Earth \
+  --body-radius-km 6371.0088 \
   --force
 ```
+
+Omit `--body-radius-km` for abstract spherical maps. The viewer will then show
+scale bars in angular units rather than physical distance.
 
 If the Zarr array does not store dimension names, provide them explicitly:
 
@@ -417,8 +613,13 @@ npm run convert:hpx -- \
   --default-view globe \
   --colormap turbo \
   --scale linear \
+  --body-name Earth \
+  --body-radius-km 6371.0088 \
   --force
 ```
+
+Use `--body-radius-km` only when the particles live on a physical sphere. If it
+is omitted, the viewer's scale bar uses angular units.
 
 Validate and run:
 

@@ -43,6 +43,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--default-view", choices=["net", "globe"], default="globe")
     parser.add_argument("--colormap", default="viridis")
     parser.add_argument("--scale", choices=["linear", "log", "symlog"], default="linear")
+    parser.add_argument("--body-name", default=None, help="Optional physical body name for globe scale bars.")
+    parser.add_argument("--body-radius-km", type=float, default=None, help="Optional body mean radius in kilometers.")
     parser.add_argument("--force", action="store_true")
     return parser.parse_args()
 
@@ -174,8 +176,24 @@ def main() -> None:
             }
         ],
     }
+    body = body_metadata(args.body_name, args.body_radius_km)
+    if body:
+        manifest["body"] = body
     (args.output / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     print(f"wrote {args.output / 'manifest.json'}")
+
+
+def body_metadata(name: str | None, radius_km: float | None) -> dict[str, object] | None:
+    if radius_km is None and not name:
+        return None
+    body: dict[str, object] = {}
+    if name:
+        body["name"] = name
+    if radius_km is not None:
+        if not math.isfinite(radius_km) or radius_km <= 0:
+            raise SystemExit("--body-radius-km must be a positive finite number")
+        body["radiusKm"] = float(radius_km)
+    return body
 
 
 def open_zarr_group(path: Path) -> Any:

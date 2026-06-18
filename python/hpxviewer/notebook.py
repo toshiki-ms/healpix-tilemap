@@ -1,16 +1,22 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from html import escape
 import json
 import subprocess
+import tempfile
 import time
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlencode
 import urllib.error
 import urllib.request
 
+from .paths import repo_root
 from .selection import TileSelection
 from .server import start_viewer
+
+VIEW_STATE_SCHEMA = "healpix-tilemap.view-state.v1"
 
 
 class Viewer:
@@ -34,6 +40,7 @@ class Viewer:
         grid: bool | None = None,
         remote: bool = False,
     ) -> None:
+        self._view_state: dict[str, Any] | None = None
         self.base_url = base_url
         self.server_host = server_host
         self.server_port = server_port
@@ -60,7 +67,47 @@ class Viewer:
                 self.params[query_key] = "1" if value else "0"
             else:
                 self.params[query_key] = value
+            self._view_state = None
         return self
+
+    def view_state(self) -> dict[str, Any]:
+        """Return a reusable ``view_state.json`` compatible dictionary.
+
+        The returned object can be saved with ``json.dump`` and later restored
+        with ``Viewer.from_view_state`` or the browser's ``Load JSON`` button.
+        """
+
+        if self._view_state is not None:
+            return _json_copy(self._view_state)
+        return _view_state_from_params(self.params)
+
+    @classmethod
+    def from_view_state(
+        cls,
+        state: Mapping[str, Any] | str | Path,
+        *,
+        base_url: str | None = None,
+        server_host: str = "127.0.0.1",
+        server_port: int = 4181,
+        remote: bool = False,
+    ) -> "Viewer":
+        """Create a notebook viewer from a saved view-state dictionary or file."""
+
+        view_state = _load_view_state(state)
+        params = _params_from_view_state(view_state)
+        dataset = str(params.get("dataset") or "")
+        if not dataset:
+            raise ValueError("View state is missing datasetId/dataset.")
+        viewer = cls(
+            dataset,
+            base_url=base_url,
+            server_host=server_host,
+            server_port=server_port,
+            remote=remote,
+        )
+        viewer.params = params
+        viewer._view_state = view_state
+        return viewer
 
     def url(self, *, start_server: bool = True) -> str:
         if start_server:
@@ -145,6 +192,7 @@ class Viewer:
         safe_url = escape(url, quote=True)
         width_css = f"{width}px" if isinstance(width, int) else str(width)
         expected_dataset = json.dumps(str(self.params.get("dataset", "")))
+        view_state_json = json.dumps(self.view_state(), separators=(",", ":"))
         parts: list[str] = [
             '<div style="font-family: system-ui, sans-serif; max-width: 100%;">',
         ]
@@ -181,6 +229,23 @@ class Viewer:
             "if(expectedDataset&&event.data.payload&&event.data.payload.datasetId!==expectedDataset)return;"
             "panel.textContent=JSON.stringify(event.data.payload,null,2);"
             "});"
+            f"const viewState={view_state_json};"
+            "const frame=root.querySelector('iframe');"
+            "if(frame&&viewState){"
+            "let attempts=0;"
+            "let applied=false;"
+            "window.addEventListener('message',function(event){"
+            "if(event.source===frame.contentWindow&&event.data&&event.data.type==='hpxviewer:viewStateApplied')applied=true;"
+            "});"
+            "const sendViewState=function(){"
+            "if(applied||!frame.contentWindow||attempts>=40)return;"
+            "attempts+=1;"
+            "frame.contentWindow.postMessage({type:'hpxviewer:setViewState',payload:viewState},'*');"
+            "setTimeout(sendViewState,250);"
+            "};"
+            "frame.addEventListener('load',function(){attempts=0;applied=false;setTimeout(sendViewState,100);});"
+            "setTimeout(sendViewState,100);"
+            "}"
             "})();"
             "</script>"
         )
@@ -212,5 +277,323 @@ class Viewer:
         )
         return output_path
 
+    def save_image(
+        self,
+        output: str | Path,
+        *,
+        mode: str = "figure",
+        format: str | None = None,
+        scale: int = 1,
+        width: int | None = None,
+        height: int | None = None,
+        viewport_width: int = 1280,
+        viewport_height: int = 900,
+        transparent: bool = False,
+        embed_metadata: bool = True,
+        start_server: bool = True,
+        timeout: float = 60.0,
+        chrome: str | None = None,
+    ) -> Path:
+        """Render the current view to an image without showing a browser window.
+
+        The implementation starts or reuses the local viewer server, opens the
+        viewer in headless Chrome, then calls the same browser-side export path
+        as the interactive ``Save Image`` dialog.
+        """
+
+        output_path = Path(output).expanduser().resolve()
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        export_format = format or output_path.suffix.lstrip(".") or "png"
+        script = repo_root() / "tools" / "headless_export_image.mjs"
+        view_state_path: Path | None = None
+        command = [
+            "node",
+            str(script),
+            "--url",
+            self.url(start_server=start_server),
+            "--output",
+            str(output_path),
+            "--mode",
+            mode,
+            "--format",
+            export_format,
+            "--scale",
+            str(scale),
+            "--viewport-width",
+            str(viewport_width),
+            "--viewport-height",
+            str(viewport_height),
+            "--timeout",
+            str(timeout),
+        ]
+        with tempfile.NamedTemporaryFile("w", suffix=".json", prefix="hpx-view-state-", delete=False) as file:
+            json.dump(self.view_state(), file)
+            view_state_path = Path(file.name)
+        command.extend(["--view-state", str(view_state_path)])
+        if width is not None:
+            command.extend(["--width", str(width)])
+        if height is not None:
+            command.extend(["--height", str(height)])
+        if transparent:
+            command.append("--transparent")
+        if not embed_metadata:
+            command.append("--no-metadata")
+        if chrome:
+            command.extend(["--chrome", chrome])
+        try:
+            subprocess.run(command, check=True, cwd=repo_root())
+        finally:
+            if view_state_path is not None:
+                view_state_path.unlink(missing_ok=True)
+        return output_path
+
     def _repr_html_(self) -> str:
         return self.html()
+
+
+def _load_view_state(state: Mapping[str, Any] | str | Path) -> dict[str, Any]:
+    if isinstance(state, Mapping):
+        return _json_copy(dict(state))
+    if isinstance(state, Path):
+        return _json_copy(json.loads(state.expanduser().read_text(encoding="utf-8")))
+    text = str(state)
+    stripped = text.lstrip()
+    if stripped.startswith("{"):
+        return _json_copy(json.loads(text))
+    return _json_copy(json.loads(Path(text).expanduser().read_text(encoding="utf-8")))
+
+
+def _view_state_from_params(params: Mapping[str, object]) -> dict[str, Any]:
+    split = str(params.get("split") or "single")
+    if split not in {"single", "vertical", "horizontal"}:
+        split = "single"
+    active_pane_id = str(params.get("pane") or "left")
+    if active_pane_id not in {"left", "right"}:
+        active_pane_id = "left"
+    left = _pane_state_from_params(params, "")
+    right = _pane_state_from_params(params, "right", fallback=left)
+    panes = {"left": left, "right": right}
+    active = panes.get(active_pane_id) or left
+    export_state = {
+        "mode": str(params.get("exportMode") or "active"),
+        "scale": _int_or(params.get("exportScale"), 1),
+        "width": str(params.get("exportWidth") or ""),
+        "height": str(params.get("exportHeight") or ""),
+        "embedMetadata": _bool_param(params.get("exportEmbedMetadata"), True),
+        "transparent": _bool_param(params.get("exportTransparent"), False),
+    }
+    state: dict[str, Any] = {
+        "schema": VIEW_STATE_SCHEMA,
+        "type": "hpxviewer:view",
+        "version": 2,
+        "split": split,
+        "splitMode": split,
+        "activePaneId": active_pane_id,
+        "linkCamera": _bool_param(params.get("linkCamera"), False),
+        "linkDataset": _bool_param(params.get("linkDataset"), False),
+        "linkColorScale": _bool_param(params.get("linkColorScale"), False),
+        "footprint": _bool_param(params.get("footprint"), False),
+        "showFootprint": _bool_param(params.get("footprint"), False),
+        "footprintColor": str(params.get("footprintColor") or "#000000"),
+        "overview": _bool_param(params.get("overview"), False),
+        "overviewMode": _bool_param(params.get("overview"), False),
+        "export": export_state,
+        **active,
+        "panes": panes,
+    }
+    return state
+
+
+def _pane_state_from_params(
+    params: Mapping[str, object],
+    prefix: str,
+    *,
+    fallback: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    fallback = fallback or {}
+    key = _prefixed_key(prefix)
+    dataset = params.get(key("Dataset")) if prefix else params.get("dataset")
+    layer = params.get(key("Layer")) if prefix else params.get("layer")
+    view = params.get(key("View")) if prefix else params.get("view")
+    order = params.get(key("Order")) if prefix else params.get("order")
+    cmap = params.get(key("Cmap")) if prefix else params.get("cmap")
+    scale = params.get(key("Scale")) if prefix else params.get("scale")
+    min_value = params.get(key("Min")) if prefix else params.get("min")
+    max_value = params.get(key("Max")) if prefix else params.get("max")
+    camera = params.get(key("Camera")) if prefix else params.get("camera")
+    pane_id = "right" if prefix else "left"
+    state: dict[str, Any] = {
+        "paneId": pane_id,
+        "datasetId": str(dataset or fallback.get("datasetId") or fallback.get("dataset") or ""),
+        "layerId": str(layer or fallback.get("layerId") or fallback.get("layer") or ""),
+        "view": str(view or fallback.get("view") or "net"),
+        "order": _int_or(order, _int_or(fallback.get("order"), 0)),
+        "colormap": str(cmap or fallback.get("colormap") or fallback.get("cmap") or "viridis"),
+        "scale": str(scale or fallback.get("scale") or "linear"),
+        "min": _float_or(min_value, _float_or(fallback.get("min"), float("nan"))),
+        "max": _float_or(max_value, _float_or(fallback.get("max"), float("nan"))),
+        "relief": _bool_param(params.get("relief"), _bool_value(fallback.get("relief"), True)),
+        "grid": _bool_param(params.get("grid"), _bool_value(fallback.get("grid"), False)),
+        "axes": _bool_param(params.get("axes"), _bool_value(fallback.get("axes"), False)),
+        "northUp": _bool_param(
+            params.get("north"),
+            _bool_value(fallback.get("northUp", fallback.get("north")), False),
+        ),
+        "graticule": _bool_param(params.get("graticule"), _bool_value(fallback.get("graticule"), False)),
+        "scaleBar": _bool_param(
+            params.get("scalebar"),
+            _bool_value(fallback.get("scaleBar", fallback.get("scalebar")), False),
+        ),
+        "viewPanel": _bool_param(
+            params.get("panel"),
+            _bool_value(fallback.get("viewPanel", fallback.get("panel")), True),
+        ),
+    }
+    if camera or fallback.get("camera"):
+        state["camera"] = str(camera or fallback["camera"])
+    return state
+
+
+def _params_from_view_state(state: Mapping[str, Any]) -> dict[str, object]:
+    split = _split_mode(state.get("splitMode", state.get("split", "single")))
+    active_pane_id = str(state.get("activePaneId", state.get("paneId", state.get("pane", "left"))))
+    if active_pane_id not in {"left", "right"}:
+        active_pane_id = "left"
+    panes = state.get("panes") if isinstance(state.get("panes"), Mapping) else {}
+    left = _pane_from_view_state(state, "left", panes)
+    right = _pane_from_view_state(state, "right", panes, fallback=left)
+    base = right if split == "single" and active_pane_id == "right" else left
+    params: dict[str, object] = {
+        "split": split,
+        "pane": active_pane_id,
+        "dataset": base.get("datasetId", ""),
+        "layer": base.get("layerId", ""),
+        "view": base.get("view", "net"),
+        "order": base.get("order", ""),
+        "cmap": base.get("colormap", "viridis"),
+        "scale": base.get("scale", "linear"),
+        "relief": _query_bool(base.get("relief", True)),
+        "grid": _query_bool(base.get("grid", False)),
+        "axes": _query_bool(base.get("axes", False)),
+        "north": _query_bool(base.get("northUp", base.get("north", False))),
+        "graticule": _query_bool(base.get("graticule", False)),
+        "scalebar": _query_bool(base.get("scaleBar", base.get("scalebar", False))),
+        "panel": _query_bool(base.get("viewPanel", base.get("panel", True))),
+        "linkCamera": _query_bool(state.get("linkCamera", False)),
+        "linkDataset": _query_bool(state.get("linkDataset", False)),
+        "linkColorScale": _query_bool(state.get("linkColorScale", False)),
+        "footprint": _query_bool(state.get("showFootprint", state.get("footprint", False))),
+        "footprintColor": str(state.get("footprintColor", "#000000")),
+        "overview": _query_bool(state.get("overviewMode", state.get("overview", False))),
+    }
+    _copy_if_present(params, "min", base.get("min"))
+    _copy_if_present(params, "max", base.get("max"))
+    _copy_if_present(params, "camera", base.get("camera"))
+    if split != "single":
+        params.update(
+            {
+                "rightDataset": right.get("datasetId", ""),
+                "rightLayer": right.get("layerId", ""),
+                "rightView": right.get("view", "net"),
+                "rightOrder": right.get("order", ""),
+                "rightCmap": right.get("colormap", "viridis"),
+                "rightScale": right.get("scale", "linear"),
+            }
+        )
+        _copy_if_present(params, "rightMin", right.get("min"))
+        _copy_if_present(params, "rightMax", right.get("max"))
+        _copy_if_present(params, "rightCamera", right.get("camera"))
+    export_state = state.get("export")
+    if isinstance(export_state, Mapping):
+        _copy_if_present(params, "exportMode", export_state.get("mode"))
+        _copy_if_present(params, "exportScale", export_state.get("scale"))
+        _copy_if_present(params, "exportWidth", export_state.get("width"))
+        _copy_if_present(params, "exportHeight", export_state.get("height"))
+        _copy_if_present(params, "exportEmbedMetadata", _query_bool(export_state.get("embedMetadata", True)))
+        _copy_if_present(params, "exportTransparent", _query_bool(export_state.get("transparent", False)))
+    return {key: value for key, value in params.items() if value not in ("", None)}
+
+
+def _pane_from_view_state(
+    state: Mapping[str, Any],
+    pane_id: str,
+    panes: Mapping[str, Any],
+    *,
+    fallback: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    source = panes.get(pane_id)
+    if not isinstance(source, Mapping):
+        source = state if pane_id == str(state.get("paneId", "left")) or pane_id == "left" else {}
+    fallback = fallback or {}
+    return {
+        "paneId": pane_id,
+        "datasetId": str(source.get("datasetId", source.get("dataset", fallback.get("datasetId", "")))),
+        "layerId": str(source.get("layerId", source.get("layer", fallback.get("layerId", "")))),
+        "view": str(source.get("view", fallback.get("view", "net"))),
+        "order": _int_or(source.get("order", source.get("maxOrder")), _int_or(fallback.get("order"), 0)),
+        "colormap": str(source.get("colormap", source.get("cmap", fallback.get("colormap", "viridis")))),
+        "scale": str(source.get("scale", fallback.get("scale", "linear"))),
+        "min": _float_or(source.get("min"), _float_or(fallback.get("min"), float("nan"))),
+        "max": _float_or(source.get("max"), _float_or(fallback.get("max"), float("nan"))),
+        "relief": _bool_value(source.get("relief", fallback.get("relief")), True),
+        "grid": _bool_value(source.get("grid", fallback.get("grid")), False),
+        "axes": _bool_value(source.get("axes", fallback.get("axes")), False),
+        "northUp": _bool_value(source.get("northUp", source.get("north", fallback.get("northUp"))), False),
+        "graticule": _bool_value(source.get("graticule", fallback.get("graticule")), False),
+        "scaleBar": _bool_value(source.get("scaleBar", source.get("scalebar", fallback.get("scaleBar"))), False),
+        "viewPanel": _bool_value(source.get("viewPanel", source.get("panel", fallback.get("viewPanel"))), True),
+        **({"camera": str(source.get("camera"))} if source.get("camera") is not None else {}),
+    }
+
+
+def _split_mode(value: Any) -> str:
+    return str(value) if value in {"single", "vertical", "horizontal"} else "single"
+
+
+def _prefixed_key(prefix: str):
+    return lambda name: f"{prefix}{name}"
+
+
+def _copy_if_present(params: dict[str, object], key: str, value: Any) -> None:
+    if value is not None and value != "":
+        params[key] = value
+
+
+def _bool_param(value: object, fallback: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    text = str(value).lower()
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off"}:
+        return False
+    return fallback
+
+
+def _bool_value(value: object, fallback: bool = False) -> bool:
+    if value is None:
+        return fallback
+    return _bool_param(value, fallback)
+
+
+def _query_bool(value: object) -> str:
+    return "1" if _bool_value(value, False) else "0"
+
+
+def _int_or(value: object, fallback: int) -> int:
+    try:
+        number = int(str(value))
+    except (TypeError, ValueError):
+        return fallback
+    return number
+
+
+def _float_or(value: object, fallback: float) -> float:
+    try:
+        return float(str(value))
+    except (TypeError, ValueError):
+        return fallback
+
+
+def _json_copy(value: Any) -> Any:
+    return json.loads(json.dumps(value, allow_nan=True))

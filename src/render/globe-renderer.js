@@ -12,7 +12,7 @@ import {
   tileGridSize,
   tileKey
 } from "../core/tile-address.js";
-import { clampOrder, detailOrderForBasePixels } from "./lod.js";
+import { clampOrder, detailOrderForBasePixels, LOD_TARGET_TILE_PIXELS } from "./lod.js";
 import {
   addTileToSelection,
   addTilesAlongLine,
@@ -20,6 +20,7 @@ import {
   isTileSelectionPointer
 } from "./region-selection.js";
 import { sampleTileValue } from "./tile-visual.js";
+import { viewportSurfaceSegments } from "./viewport-footprint.js";
 
 const PATCH_SEGMENTS = 18;
 const GLOBE_RADIUS = 1.004;
@@ -35,13 +36,31 @@ const NEAR_FOCUS_DETAIL_ANGLE = 0.11;
 const FAR_FOCUS_DETAIL_ANGLE = 1.15;
 const FOCUS_DETAIL_DISTANCE_SPAN = 1.2;
 const SURFACE_DRAG_GAIN = 1.35;
-const MIN_ROTATE_SPEED = 0.006;
+const MIN_ROTATE_SPEED = 0.03;
+const MAX_DETAIL_MIN_ROTATE_SPEED = 0.055;
 const MAX_ROTATE_SPEED = 0.55;
 const NEAR_ZOOM_SPEED = 0.42;
 const FAR_ZOOM_SPEED = 0.78;
 const NEAR_DAMPING = 0.32;
 const FAR_DAMPING = 0.08;
+const MIN_CAMERA_FOV = 1;
+const MAX_CAMERA_FOV = 179.9;
+const DEFAULT_CAMERA_FOV = 38;
 const RELIEF_LAYER_PATTERN = /(elevation|height|terrain|topo|dem)/i;
+const AXIS_LENGTH = GLOBE_RADIUS * 1.56;
+const AXIS_INNER_RADIUS = GLOBE_RADIUS * 1.08;
+const DEFAULT_CAMERA_UP = new THREE.Vector3(0, 0, 1);
+const GEOGRAPHIC_NORTH_DISPLAY = new THREE.Vector3(0, 0, 1);
+const GRATICULE_RADIUS = GLOBE_RADIUS + 0.003;
+const ANGULAR_RADIUS_DEG = 180 / Math.PI;
+const FOOTPRINT_RADIUS = 0.0075;
+const FOOTPRINT_SURFACE_RADIUS = GLOBE_RADIUS + 0.014;
+const AXIS_ROTATE_DERIVATIVE_EPSILON = 0.01;
+const AXIS_VECTORS = {
+  x: new THREE.Vector3(1, 0, 0),
+  y: new THREE.Vector3(0, 1, 0),
+  z: new THREE.Vector3(0, 0, 1)
+};
 
 const GLOBE_VERTEX_SHADER = `
 out vec2 vUv;
@@ -229,6 +248,7 @@ export class GlobeRenderer {
   constructor({ canvas, manifest, scheduler, state, onHover, onSelect = () => {} }) {
     this.canvas = canvas;
     this.manifest = manifest;
+    this.surfaceScale = surfaceScaleForManifest(manifest);
     this.scheduler = scheduler;
     this.state = state;
     this.onHover = onHover;
@@ -242,11 +262,19 @@ export class GlobeRenderer {
     this.pointer = new THREE.Vector2();
     this.pointerDown = null;
     this.tileSelection = null;
+    this.axisKey = null;
+    this.axisDrag = null;
+    this.suppressClick = false;
     this.selectedTiles = new Map();
     this.selectionMeshes = new Map();
     this.hovered = null;
 
-    this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false });
+    this.renderer = new THREE.WebGLRenderer({
+      canvas,
+      antialias: true,
+      alpha: true,
+      preserveDrawingBuffer: true
+    });
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
     this.renderer.setClearColor(0x202326, 1);
     this.textureSupport = scalarTextureSupport(this.renderer.getContext());
@@ -264,7 +292,7 @@ export class GlobeRenderer {
       transparent: true
     });
 
-    this.camera = new THREE.PerspectiveCamera(38, 1, 0.01, 100);
+    this.camera = new THREE.PerspectiveCamera(DEFAULT_CAMERA_FOV, 1, 0.01, 100);
     this.camera.up.set(0, 0, 1);
     this.camera.position.set(3.2, 2.15, 1.7);
     this.camera.lookAt(0, 0, 0);
@@ -280,9 +308,31 @@ export class GlobeRenderer {
 
     const ambient = new THREE.AmbientLight(0xffffff, 1.25);
     this.scene.add(ambient);
+    this.axesGroup = createAxesGroup();
+    this.axesGroup.visible = Boolean(this.state.axes);
+    this.scene.add(this.axesGroup);
+    this.graticuleGroup = createGraticuleGroup();
+    this.graticuleGroup.visible = Boolean(this.state.graticule);
+    this.scene.add(this.graticuleGroup);
+    this.footprintGroup = new THREE.Group();
+    this.footprintGroup.renderOrder = 30;
+    this.footprintMaterial = new THREE.MeshBasicMaterial({
+      color: 0x000000,
+      depthTest: true,
+      depthWrite: false,
+      polygonOffset: true,
+      polygonOffsetFactor: -8,
+      polygonOffsetUnits: -8,
+      transparent: true,
+      opacity: 0.98
+    });
+    this.scene.add(this.footprintGroup);
     this.blankTextures = createBlankTextures();
 
     canvas.addEventListener("pointerdown", (event) => {
+      if (this.beginAxisDrag(event)) {
+        return;
+      }
       if (isTileSelectionPointer(event)) {
         event.preventDefault();
         event.stopImmediatePropagation();
@@ -300,11 +350,16 @@ export class GlobeRenderer {
       this.updateInteractionScale();
     }, { capture: true });
     canvas.addEventListener("pointerup", (event) => this.onPointerUp(event), { capture: true });
-    canvas.addEventListener("pointercancel", () => {
+    canvas.addEventListener("pointercancel", (event) => {
+      this.endAxisDrag(event);
       this.tileSelection = null;
       this.pointerDown = null;
     }, { capture: true });
     canvas.addEventListener("pointermove", (event) => {
+      if (this.axisDrag) {
+        this.updateAxisDrag(event);
+        return;
+      }
       if (this.tileSelection) {
         event.preventDefault();
         event.stopImmediatePropagation();
@@ -332,6 +387,12 @@ export class GlobeRenderer {
       this.onHover(null);
     });
     canvas.addEventListener("contextmenu", (event) => event.preventDefault());
+    window.addEventListener("keydown", (event) => this.onAxisKeyDown(event));
+    window.addEventListener("keyup", (event) => this.onAxisKeyUp(event));
+    window.addEventListener("blur", () => {
+      this.axisKey = null;
+      this.endAxisDrag();
+    });
   }
 
   resize() {
@@ -345,8 +406,236 @@ export class GlobeRenderer {
 
   resetView() {
     this.camera.position.set(3.2, 2.15, 1.7);
+    this.camera.fov = DEFAULT_CAMERA_FOV;
+    this.camera.up.copy(DEFAULT_CAMERA_UP);
+    this.camera.updateProjectionMatrix();
     this.controls.target.set(0, 0, 0);
     this.constrainCameraOutsideGlobe();
+    this.updateInteractionScale();
+    if (this.state.northUp) {
+      this.alignNorthUp();
+    }
+    this.controls.update();
+  }
+
+  setAxesVisible(visible) {
+    this.axesGroup.visible = Boolean(visible);
+  }
+
+  setGraticuleVisible(visible) {
+    this.graticuleGroup.visible = Boolean(visible);
+  }
+
+  setFootprintSegments(segments = [], color = "#000000") {
+    const signature = footprintSignature(segments, color);
+    if (this.footprintSignature === signature) {
+      return;
+    }
+    this.footprintSignature = signature;
+    clearGroup(this.footprintGroup);
+    this.footprintMaterial.color.set(color);
+    for (const segment of segments) {
+      if (!Array.isArray(segment) || segment.length < 2) {
+        continue;
+      }
+      const points = segment.map((point) => new THREE.Vector3(
+        point[0] * FOOTPRINT_SURFACE_RADIUS,
+        point[1] * FOOTPRINT_SURFACE_RADIUS,
+        point[2] * FOOTPRINT_SURFACE_RADIUS
+      ));
+      const closed = isClosedPointLoop(points);
+      const curvePoints = closed ? points.slice(0, -1) : points;
+      const curve = new THREE.CatmullRomCurve3(curvePoints, closed);
+      const geometry = new THREE.TubeGeometry(
+        curve,
+        Math.max(8, curvePoints.length * 2),
+        FOOTPRINT_RADIUS,
+        6,
+        closed
+      );
+      const mesh = new THREE.Mesh(geometry, this.footprintMaterial);
+      mesh.renderOrder = 38;
+      this.footprintGroup.add(mesh);
+    }
+  }
+
+  setNorthUp(visible) {
+    if (visible) {
+      this.alignNorthUp();
+    } else {
+      this.camera.up.copy(DEFAULT_CAMERA_UP);
+      this.camera.lookAt(this.controls.target);
+    }
+    this.controls.update();
+  }
+
+  onAxisKeyDown(event) {
+    if (isTextEditingTarget(event.target)) {
+      return;
+    }
+    const key = axisKeyFromEvent(event);
+    if (!key) {
+      return;
+    }
+    this.axisKey = key;
+  }
+
+  onAxisKeyUp(event) {
+    const key = axisKeyFromEvent(event);
+    if (!key || key !== this.axisKey) {
+      return;
+    }
+    this.axisKey = null;
+    this.endAxisDrag(event);
+  }
+
+  beginAxisDrag(event) {
+    if (!this.axisKey || event.button !== 0) {
+      return false;
+    }
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    this.canvas.setPointerCapture(event.pointerId);
+    this.axisDrag = {
+      pointerId: event.pointerId,
+      axisKey: this.axisKey,
+      lastX: event.clientX,
+      lastY: event.clientY,
+      moved: false
+    };
+    this.pointerDown = null;
+    this.controls.enabled = false;
+    this.updateInteractionScale();
+    return true;
+  }
+
+  updateAxisDrag(event) {
+    if (!this.axisDrag || event.pointerId !== this.axisDrag.pointerId) {
+      return;
+    }
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    const dx = event.clientX - this.axisDrag.lastX;
+    const dy = event.clientY - this.axisDrag.lastY;
+    this.axisDrag.lastX = event.clientX;
+    this.axisDrag.lastY = event.clientY;
+    if (Math.hypot(dx, dy) < 1e-6) {
+      return;
+    }
+    const angle = this.axisDragAngle(this.axisDrag.axisKey, dx, dy);
+    if (!Number.isFinite(angle) || Math.abs(angle) < 1e-8) {
+      return;
+    }
+    this.axisDrag.moved = true;
+    this.rotateAroundDisplayAxis(this.axisDrag.axisKey, angle);
+  }
+
+  axisDragAngle(axisKey, dx, dy) {
+    const basis = this.axisScreenBasis(axisKey);
+    if (!basis) {
+      return 0;
+    }
+    const signedPixels = dx * basis.direction.x + dy * basis.direction.y;
+    return signedPixels / basis.pixelsPerRadian;
+  }
+
+  axisScreenBasis(axisKey) {
+    const axis = AXIS_VECTORS[axisKey];
+    if (!axis) {
+      return null;
+    }
+    const rect = this.canvas.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) {
+      return null;
+    }
+    this.camera.updateMatrixWorld(true);
+    this.camera.updateProjectionMatrix();
+    const rotation = new THREE.Quaternion().setFromAxisAngle(axis, AXIS_ROTATE_DERIVATIVE_EPSILON);
+    const rotatedTarget = this.controls.target.clone().applyQuaternion(rotation);
+    const rotatedCamera = this.camera.clone();
+    rotatedCamera.position.applyQuaternion(rotation);
+    rotatedCamera.up.applyQuaternion(rotation).normalize();
+    rotatedCamera.lookAt(rotatedTarget);
+    rotatedCamera.updateMatrixWorld(true);
+    rotatedCamera.updateProjectionMatrix();
+
+    let best = null;
+    for (const point of this.axisReferencePoints(rect)) {
+      const before = projectToCanvasPixels(point, this.camera, rect);
+      const after = projectToCanvasPixels(point, rotatedCamera, rect);
+      if (!before || !after) {
+        continue;
+      }
+      const tangent = after.sub(before);
+      const pixelsPerRadian = tangent.length() / AXIS_ROTATE_DERIVATIVE_EPSILON;
+      if (!Number.isFinite(pixelsPerRadian) || pixelsPerRadian <= 1e-6) {
+        continue;
+      }
+      if (!best || pixelsPerRadian > best.pixelsPerRadian) {
+        best = {
+          direction: tangent.normalize(),
+          pixelsPerRadian
+        };
+      }
+    }
+    return best;
+  }
+
+  axisReferencePoints(rect) {
+    const samples = [
+      [0.5, 0.5],
+      [0.35, 0.5],
+      [0.65, 0.5],
+      [0.5, 0.35],
+      [0.5, 0.65],
+      [0.35, 0.35],
+      [0.65, 0.65]
+    ];
+    const points = [];
+    for (const [fx, fy] of samples) {
+      const vector = this.surfaceDisplayVectorAtScreenPoint(
+        rect.left + rect.width * fx,
+        rect.top + rect.height * fy
+      );
+      if (vector) {
+        points.push(new THREE.Vector3(vector[0], vector[1], vector[2]).multiplyScalar(GLOBE_RADIUS));
+      }
+    }
+    return points;
+  }
+
+  endAxisDrag(event = null) {
+    if (!this.axisDrag) {
+      return false;
+    }
+    const pointerId = this.axisDrag.pointerId;
+    if (event && event.pointerId === pointerId) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+    }
+    if (this.canvas.hasPointerCapture(pointerId)) {
+      this.canvas.releasePointerCapture(pointerId);
+    }
+    this.suppressClick = this.axisDrag.moved;
+    this.axisDrag = null;
+    this.controls.enabled = true;
+    return true;
+  }
+
+  rotateAroundDisplayAxis(axisKey, angle) {
+    const axis = AXIS_VECTORS[axisKey];
+    if (!axis) {
+      return;
+    }
+    const rotation = new THREE.Quaternion().setFromAxisAngle(axis, angle);
+    this.camera.position.applyQuaternion(rotation);
+    this.controls.target.applyQuaternion(rotation);
+    this.camera.up.applyQuaternion(rotation).normalize();
+    this.constrainCameraOutsideGlobe();
+    this.camera.lookAt(this.controls.target);
+    if (this.state.northUp) {
+      this.alignNorthUp();
+    }
     this.updateInteractionScale();
     this.controls.update();
   }
@@ -362,7 +651,81 @@ export class GlobeRenderer {
     this.camera.lookAt(0, 0, 0);
     this.constrainCameraOutsideGlobe();
     this.updateInteractionScale();
+    if (this.state.northUp) {
+      this.alignNorthUp();
+    }
     this.controls.update();
+  }
+
+  applyViewState(view = {}) {
+    const camera = view.camera ?? view;
+    const position = vector3FromObject(camera.position);
+    const target = vector3FromObject(camera.target);
+    if (position) {
+      this.camera.position.copy(position);
+    }
+    if (target) {
+      this.controls.target.copy(target);
+    }
+    const center = camera.centerLonLat ?? camera.lonLat ?? view.centerLonLat ?? view.lonLat;
+    if (!position && !target && center && Number.isFinite(Number(center.lon)) && Number.isFinite(Number(center.lat))) {
+      this.focusLonLat(center.lon, center.lat, camera.distance ?? view.distance);
+    }
+    const fov = normalizeCameraFov(camera.fov ?? view.fov);
+    if (Number.isFinite(fov)) {
+      this.camera.fov = fov;
+      this.camera.updateProjectionMatrix();
+    }
+    this.constrainCameraOutsideGlobe();
+    this.camera.lookAt(this.controls.target);
+    this.updateInteractionScale();
+    if (this.state.northUp) {
+      this.alignNorthUp();
+    }
+    this.controls.update();
+  }
+
+  viewState() {
+    const centerDisplay = this.surfaceFocusDirection();
+    const centerProjection = displayVectorToProjection(centerDisplay);
+    const centerLonLat = vectorToLonLat(centerProjection);
+    return {
+      camera: {
+        position: vectorObject(this.camera.position),
+        target: vectorObject(this.controls.target),
+        distance: this.camera.position.distanceTo(this.controls.target),
+        fov: this.camera.fov,
+        centerLonLat,
+        centerVector: vectorObject(centerDisplay)
+      },
+      coordinateSystem: {
+        camera: "display-xyz-z-up",
+        centerVector: "display-xyz-z-up",
+        projectionVector: "internal-projection-xyz-y-up",
+        note: "The UI uses Z-up display XYZ, so +Z is the north pole. Internal projection vectors use Y-up."
+      }
+    };
+  }
+
+  cameraUrlValue() {
+    const p = this.camera.position;
+    const t = this.controls.target;
+    return [p.x, p.y, p.z, t.x, t.y, t.z, this.camera.fov].map((value) => compactFloat(value)).join(",");
+  }
+
+  applyCameraUrlValue(value) {
+    if (!value) {
+      return;
+    }
+    const parts = String(value).split(",").map(Number);
+    if (parts.length !== 7 || parts.some((item) => !Number.isFinite(item))) {
+      return;
+    }
+    this.applyViewState({
+      position: { x: parts[0], y: parts[1], z: parts[2] },
+      target: { x: parts[3], y: parts[4], z: parts[5] },
+      fov: parts[6]
+    });
   }
 
   desiredTiles() {
@@ -446,29 +809,61 @@ export class GlobeRenderer {
   }
 
   detailOrder(maxOrder = this.manifest.maxOrder) {
+    return this.lodDiagnostics(maxOrder).selectedOrder;
+  }
+
+  lodDiagnostics(maxOrder = this.manifest.maxOrder) {
     this.resize();
     const rect = this.canvas.getBoundingClientRect();
     const viewportPixels = Math.max(1, Math.min(rect.width, rect.height));
     const fov = THREE.MathUtils.degToRad(this.camera.fov);
-    const distance = Math.max(0.001, this.camera.position.distanceTo(this.controls.target));
-    if (distance <= this.controls.minDistance * GLOBE_MAX_DETAIL_DISTANCE_FACTOR) {
-      const minOrder = this.manifest.minOrder ?? this.manifest.tileShift;
-      return clampOrder(maxOrder, minOrder, this.manifest.maxOrder);
+    const cameraRadius = Math.max(GLOBE_MIN_CAMERA_RADIUS, this.camera.position.length());
+    const minOrder = this.manifest.minOrder ?? this.manifest.tileShift;
+    if (cameraRadius <= this.controls.minDistance * GLOBE_MAX_DETAIL_DISTANCE_FACTOR) {
+      return {
+        view: "globe",
+        reason: "near-surface",
+        minOrder,
+        manifestMaxOrder: this.manifest.maxOrder,
+        requestedMaxOrder: maxOrder,
+        selectedOrder: clampOrder(maxOrder, minOrder, this.manifest.maxOrder),
+        cameraRadius,
+        fovDegrees: this.camera.fov,
+        viewportPixels,
+        targetTilePixels: LOD_TARGET_TILE_PIXELS
+      };
     }
     const focalPixels = (viewportPixels * 0.5) / Math.tan(fov * 0.5);
-    const horizonDistance = Math.sqrt(Math.max(0.0001, distance * distance - GLOBE_RADIUS * GLOBE_RADIUS));
-    return detailOrderForBasePixels(
-      (focalPixels / horizonDistance) * GLOBE_LOD_FACE_FACTOR,
-      this.manifest,
-      maxOrder
-    );
+    const horizonDistance = Math.sqrt(Math.max(0.0001, cameraRadius * cameraRadius - GLOBE_RADIUS * GLOBE_RADIUS));
+    const basePixels = (focalPixels / horizonDistance) * GLOBE_LOD_FACE_FACTOR;
+    return {
+      view: "globe",
+      reason: "projected-face-size",
+      minOrder,
+      manifestMaxOrder: this.manifest.maxOrder,
+      requestedMaxOrder: maxOrder,
+      selectedOrder: detailOrderForBasePixels(basePixels, this.manifest, maxOrder),
+      basePixels,
+      focalPixels,
+      horizonDistance,
+      cameraRadius,
+      fovDegrees: this.camera.fov,
+      viewportPixels,
+      targetTilePixels: LOD_TARGET_TILE_PIXELS,
+      faceFactor: GLOBE_LOD_FACE_FACTOR
+    };
   }
 
   draw() {
     this.resize();
     this.syncMeshes();
+    this.setAxesVisible(this.state.axes);
+    this.setGraticuleVisible(this.state.graticule);
     this.controls.update();
     this.constrainCameraOutsideGlobe();
+    if (this.state.northUp) {
+      this.alignNorthUp();
+    }
     this.updateInteractionScale();
     this.renderer.render(this.scene, this.camera);
   }
@@ -587,14 +982,121 @@ export class GlobeRenderer {
   }
 
   updateInteractionScale() {
+    const cameraRadius = Math.max(GLOBE_MIN_CAMERA_RADIUS, this.camera.position.length());
     const distance = Math.max(0.001, this.camera.position.distanceTo(this.controls.target));
-    const altitude = Math.max(0.006, distance - GLOBE_RADIUS);
+    const altitude = Math.max(GLOBE_MIN_CAMERA_ALTITUDE, cameraRadius - GLOBE_RADIUS);
     const fov = THREE.MathUtils.degToRad(this.camera.fov);
-    const normalizedSpeed = (altitude / GLOBE_RADIUS) * (Math.tan(fov * 0.5) / Math.PI) * SURFACE_DRAG_GAIN;
-    this.controls.rotateSpeed = THREE.MathUtils.clamp(normalizedSpeed, MIN_ROTATE_SPEED, MAX_ROTATE_SPEED);
+    const altitudeRatio = altitude / GLOBE_RADIUS;
+    const normalizedSpeed = Math.max(altitudeRatio, Math.sqrt(altitudeRatio) * 0.18)
+      * (Math.tan(fov * 0.5) / Math.PI)
+      * SURFACE_DRAG_GAIN;
+    const detailT = THREE.MathUtils.clamp(this.state.order - (this.state.maxOrder - 1), 0, 1);
+    const minRotateSpeed = THREE.MathUtils.lerp(MIN_ROTATE_SPEED, MAX_DETAIL_MIN_ROTATE_SPEED, detailT);
+    this.controls.rotateSpeed = THREE.MathUtils.clamp(normalizedSpeed, minRotateSpeed, MAX_ROTATE_SPEED);
     const zoomT = THREE.MathUtils.clamp((distance - 1.15) / 2.5, 0, 1);
     this.controls.zoomSpeed = THREE.MathUtils.lerp(NEAR_ZOOM_SPEED, FAR_ZOOM_SPEED, zoomT);
     this.controls.dampingFactor = THREE.MathUtils.lerp(NEAR_DAMPING, FAR_DAMPING, zoomT);
+  }
+
+  alignNorthUp() {
+    const viewNormal = this.camera.position.clone().sub(this.controls.target);
+    if (viewNormal.lengthSq() < 1e-10) {
+      return;
+    }
+    viewNormal.normalize();
+
+    const focus = this.surfaceFocusDirection();
+    const localNorth = GEOGRAPHIC_NORTH_DISPLAY.clone()
+      .sub(focus.clone().multiplyScalar(GEOGRAPHIC_NORTH_DISPLAY.dot(focus)));
+    const north = localNorth.lengthSq() > 1e-8 ? localNorth.normalize() : GEOGRAPHIC_NORTH_DISPLAY;
+    const screenNorth = north
+      .clone()
+      .sub(viewNormal.clone().multiplyScalar(north.dot(viewNormal)));
+    if (screenNorth.lengthSq() < 1e-8) {
+      this.camera.up.copy(DEFAULT_CAMERA_UP);
+    } else {
+      this.camera.up.copy(screenNorth.normalize());
+    }
+    this.camera.lookAt(this.controls.target);
+  }
+
+  surfaceScalePerPixel(samplePixels = 120) {
+    const distance = this.surfaceDistanceForScreenPixels(samplePixels, this.surfaceScale.radius);
+    return {
+      ...this.surfaceScale,
+      valuePerPixel: Number.isFinite(distance) && distance > 0 ? distance / samplePixels : Number.NaN
+    };
+  }
+
+  surfaceDistanceForScreenPixels(samplePixels = 120, radius = 1) {
+    const rect = this.canvas.getBoundingClientRect();
+    const span = Math.max(2, Math.min(rect.width * 0.75, Number(samplePixels) || 120));
+    const y = rect.top + rect.height * 0.5;
+    const x0 = rect.left + rect.width * 0.5 - span * 0.5;
+    const x1 = rect.left + rect.width * 0.5 + span * 0.5;
+    const a = this.surfaceVectorAtScreenPoint(x0, y);
+    const b = this.surfaceVectorAtScreenPoint(x1, y);
+    if (!a || !b) {
+      return Number.NaN;
+    }
+    const dot = THREE.MathUtils.clamp(a[0] * b[0] + a[1] * b[1] + a[2] * b[2], -1, 1);
+    return Math.acos(dot) * radius;
+  }
+
+  surfaceVectorAtScreenPoint(clientX, clientY) {
+    const rect = this.canvas.getBoundingClientRect();
+    this.pointer.x = ((clientX - rect.left) / rect.width) * 2 - 1;
+    this.pointer.y = -((clientY - rect.top) / rect.height) * 2 + 1;
+    this.camera.updateMatrixWorld(true);
+    this.raycaster.setFromCamera(this.pointer, this.camera);
+    const hit = raySphereIntersection(this.raycaster.ray.origin, this.raycaster.ray.direction, GLOBE_RADIUS);
+    return hit ? displayVectorToProjection(hit.normalize()) : null;
+  }
+
+  surfaceDisplayVectorAtScreenPoint(clientX, clientY) {
+    const rect = this.canvas.getBoundingClientRect();
+    this.pointer.x = ((clientX - rect.left) / rect.width) * 2 - 1;
+    this.pointer.y = -((clientY - rect.top) / rect.height) * 2 + 1;
+    this.camera.updateMatrixWorld(true);
+    this.raycaster.setFromCamera(this.pointer, this.camera);
+    const hit = raySphereIntersection(this.raycaster.ray.origin, this.raycaster.ray.direction, GLOBE_RADIUS);
+    return hit ? vectorArray(hit.normalize()) : null;
+  }
+
+  viewportSurfaceSegments(samplesPerEdge = 32) {
+    const segments = viewportSurfaceSegments(
+      this.canvas,
+      samplesPerEdge,
+      (clientX, clientY) => this.surfaceDisplayVectorAtScreenPoint(clientX, clientY)
+    );
+    return segments.length ? segments : [this.horizonSurfaceSegment(160)];
+  }
+
+  horizonSurfaceSegment(samples = 160) {
+    const direction = this.camera.position.clone();
+    const distance = direction.length();
+    if (distance <= 1e-8) {
+      return [];
+    }
+    direction.normalize();
+    const dot = THREE.MathUtils.clamp(GLOBE_RADIUS / Math.max(GLOBE_RADIUS, distance), -1, 1);
+    const radius = Math.sqrt(Math.max(0, 1 - dot * dot));
+    const reference = Math.abs(direction.z) < 0.92
+      ? new THREE.Vector3(0, 0, 1)
+      : new THREE.Vector3(0, 1, 0);
+    const u = new THREE.Vector3().crossVectors(direction, reference).normalize();
+    const v = new THREE.Vector3().crossVectors(direction, u).normalize();
+    const center = direction.clone().multiplyScalar(dot);
+    const points = [];
+    for (let i = 0; i <= samples; i += 1) {
+      const t = (i / samples) * Math.PI * 2;
+      const point = center.clone()
+        .add(u.clone().multiplyScalar(Math.cos(t) * radius))
+        .add(v.clone().multiplyScalar(Math.sin(t) * radius))
+        .normalize();
+      points.push(vectorArray(point));
+    }
+    return points;
   }
 
   horizonCullMinDot(distance) {
@@ -620,6 +1122,7 @@ export class GlobeRenderer {
   }
 
   surfaceFocusDirection() {
+    this.camera.updateMatrixWorld(true);
     const origin = this.camera.position.clone();
     const direction = new THREE.Vector3();
     this.camera.getWorldDirection(direction);
@@ -693,6 +1196,10 @@ export class GlobeRenderer {
   }
 
   onPointerUp(event) {
+    if (this.axisDrag) {
+      this.endAxisDrag(event);
+      return;
+    }
     if (this.tileSelection) {
       const last = this.tileSelection.last;
       const end = { x: event.clientX, y: event.clientY };
@@ -725,6 +1232,12 @@ export class GlobeRenderer {
   }
 
   onClick(event) {
+    if (this.suppressClick) {
+      this.suppressClick = false;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      return;
+    }
     if (event.button !== 0) {
       return;
     }
@@ -1055,6 +1568,211 @@ function displayVector(normal) {
   return new THREE.Vector3(normal[0], normal[2], normal[1]).normalize();
 }
 
+function displayVectorToProjection(vector) {
+  return [vector.x, vector.z, vector.y];
+}
+
+function vectorArray(vector) {
+  return [Number(vector.x), Number(vector.y), Number(vector.z)];
+}
+
+function vectorObject(vector) {
+  return {
+    x: Number(vector.x),
+    y: Number(vector.y),
+    z: Number(vector.z)
+  };
+}
+
+function vector3FromObject(value) {
+  if (!value) {
+    return null;
+  }
+  const x = Number(value.x);
+  const y = Number(value.y);
+  const z = Number(value.z);
+  if (![x, y, z].every(Number.isFinite)) {
+    return null;
+  }
+  return new THREE.Vector3(x, y, z);
+}
+
+function surfaceScaleForManifest(manifest) {
+  const body = manifest?.body;
+  const radiusKm = Number(body?.radiusKm);
+  if (Number.isFinite(radiusKm) && radiusKm > 0) {
+    return {
+      radius: radiusKm,
+      unit: "km",
+      physical: true,
+      bodyName: typeof body?.name === "string" ? body.name : ""
+    };
+  }
+  return {
+    radius: ANGULAR_RADIUS_DEG,
+    unit: "deg",
+    physical: false,
+    bodyName: typeof body?.name === "string" ? body.name : ""
+  };
+}
+
+function normalizeCameraFov(value) {
+  const fov = Number(value);
+  if (!Number.isFinite(fov) || fov < MIN_CAMERA_FOV) {
+    return Number.NaN;
+  }
+  return Math.min(MAX_CAMERA_FOV, fov);
+}
+
+function clearGroup(group) {
+  for (const child of [...group.children]) {
+    group.remove(child);
+    child.geometry?.dispose?.();
+  }
+}
+
+function isClosedPointLoop(points) {
+  if (points.length < 3) {
+    return false;
+  }
+  const first = points[0];
+  const last = points[points.length - 1];
+  return first.distanceToSquared(last) < 1e-8;
+}
+
+function footprintSignature(segments, color) {
+  return `${color}|${segments.map((segment) => segment.map((point) => point
+    .map((value) => Number(value).toFixed(4))
+    .join(",")).join(";")).join("|")}`;
+}
+
+function compactFloat(value) {
+  return Number(value).toFixed(6).replace(/0+$/, "").replace(/\.$/, "");
+}
+
+function axisKeyFromEvent(event) {
+  if (event.ctrlKey || event.metaKey || event.altKey) {
+    return null;
+  }
+  const key = String(event.key ?? "").toLowerCase();
+  return key === "x" || key === "y" || key === "z" ? key : null;
+}
+
+function isTextEditingTarget(target) {
+  if (!(target instanceof Element)) {
+    return false;
+  }
+  return Boolean(target.closest("input, textarea, select, [contenteditable='true']"));
+}
+
+function projectToCanvasPixels(point, camera, rect) {
+  const ndc = point.clone().project(camera);
+  if (!Number.isFinite(ndc.x) || !Number.isFinite(ndc.y) || !Number.isFinite(ndc.z) || ndc.z < -1 || ndc.z > 1) {
+    return null;
+  }
+  return new THREE.Vector2(
+    ((ndc.x + 1) * 0.5) * rect.width,
+    ((1 - ndc.y) * 0.5) * rect.height
+  );
+}
+
+function createAxesGroup() {
+  const group = new THREE.Group();
+  const axes = [
+    { name: "X", color: 0xff6b6b, direction: new THREE.Vector3(1, 0, 0) },
+    { name: "Y", color: 0x5fd36a, direction: new THREE.Vector3(0, 1, 0) },
+    { name: "Z", color: 0x6ba7ff, direction: new THREE.Vector3(0, 0, 1) }
+  ];
+  for (const axis of axes) {
+    group.add(createAxisSegment(axis.direction, axis.color));
+    group.add(createAxisSegment(axis.direction.clone().multiplyScalar(-1), axis.color));
+    group.add(createAxisLabel(`+${axis.name}`, axis.direction, axis.color));
+    group.add(createAxisLabel(`-${axis.name}`, axis.direction.clone().multiplyScalar(-1), axis.color));
+  }
+  return group;
+}
+
+function createAxisSegment(direction, color) {
+  const start = direction.clone().normalize().multiplyScalar(AXIS_INNER_RADIUS);
+  const end = direction.clone().normalize().multiplyScalar(AXIS_LENGTH);
+  const geometry = new THREE.BufferGeometry().setFromPoints([start, end]);
+  const material = new THREE.LineBasicMaterial({
+    color,
+    transparent: true,
+    opacity: 0.68,
+    depthTest: false
+  });
+  const line = new THREE.Line(geometry, material);
+  line.renderOrder = 40;
+  return line;
+}
+
+function createAxisLabel(text, direction, color) {
+  const canvas = document.createElement("canvas");
+  canvas.width = 96;
+  canvas.height = 48;
+  const context = canvas.getContext("2d");
+  context.clearRect(0, 0, canvas.width, canvas.height);
+  context.font = "700 26px Inter, system-ui, sans-serif";
+  context.textAlign = "center";
+  context.textBaseline = "middle";
+  context.lineWidth = 5;
+  context.strokeStyle = "rgba(20, 22, 24, 0.92)";
+  context.fillStyle = `#${color.toString(16).padStart(6, "0")}`;
+  context.strokeText(text, canvas.width * 0.5, canvas.height * 0.5);
+  context.fillText(text, canvas.width * 0.5, canvas.height * 0.5);
+  const texture = new THREE.CanvasTexture(canvas);
+  const material = new THREE.SpriteMaterial({
+    map: texture,
+    transparent: true,
+    depthTest: false
+  });
+  const sprite = new THREE.Sprite(material);
+  sprite.position.copy(direction.clone().normalize().multiplyScalar(AXIS_LENGTH * 1.08));
+  sprite.scale.set(0.14, 0.07, 1);
+  sprite.renderOrder = 41;
+  return sprite;
+}
+
+function createGraticuleGroup() {
+  const group = new THREE.Group();
+  const material = new THREE.LineBasicMaterial({
+    color: 0xf6f1e7,
+    transparent: true,
+    opacity: 0.22,
+    depthTest: true,
+    depthWrite: false
+  });
+  for (let lon = -180; lon < 180; lon += 30) {
+    group.add(createLonLatLine(material, lineRange(-80, 80, 2).map((lat) => [lon, lat])));
+  }
+  for (let lat = -60; lat <= 60; lat += 30) {
+    group.add(createLonLatLine(material, lineRange(-180, 180, 2).map((lon) => [lon, lat])));
+  }
+  return group;
+}
+
+function createLonLatLine(material, lonLatPairs) {
+  const points = lonLatPairs.map(([lon, lat]) => displayLonLatPoint(lon, lat, GRATICULE_RADIUS));
+  const geometry = new THREE.BufferGeometry().setFromPoints(points);
+  const line = new THREE.Line(geometry, material);
+  line.renderOrder = 34;
+  return line;
+}
+
+function displayLonLatPoint(lon, lat, radius) {
+  const point = displayArray(lonLatToVector(lon, lat, radius));
+  return new THREE.Vector3(point[0], point[1], point[2]);
+}
+
+function lineRange(start, stop, step) {
+  const values = [];
+  for (let value = start; value <= stop; value += step) {
+    values.push(value);
+  }
+  return values;
+}
+
 function displayPoint(face, u, v) {
   const point = displayArray(faceUvToVector(face, u, v, GLOBE_RADIUS));
   return new THREE.Vector3(point[0], point[1], point[2]);
@@ -1111,6 +1829,7 @@ function emptyRenderStats(visible = 0) {
     orderCounts: {},
     exact: 0,
     approximate: 0,
+    fallback: 0,
     missing: visible,
     maxSourceOrder: null
   };
@@ -1134,5 +1853,6 @@ function updateRenderStats(stats, resolved, targetTile) {
     stats.exact += 1;
   } else {
     stats.approximate += 1;
+    stats.fallback += 1;
   }
 }

@@ -19,6 +19,9 @@ export class App {
   constructor(root = document.querySelector(".app-shell")) {
     this.root = root;
     this.controls = {
+      paneGrid: document.querySelector("#paneGrid"),
+      splitModeSelect: document.querySelector("#splitModeSelect"),
+      paneSelect: document.querySelector("#paneSelect"),
       datasetSelect: document.querySelector("#datasetSelect"),
       datasetStatus: document.querySelector("#datasetStatus"),
       loadStatus: document.querySelector("#loadStatus"),
@@ -33,6 +36,12 @@ export class App {
       reliefToggle: document.querySelector("#reliefToggle"),
       gridToggle: document.querySelector("#gridToggle"),
       axesToggle: document.querySelector("#axesToggle"),
+      linkCameraToggle: document.querySelector("#linkCameraToggle"),
+      linkDatasetToggle: document.querySelector("#linkDatasetToggle"),
+      linkColorScaleToggle: document.querySelector("#linkColorScaleToggle"),
+      showFootprintToggle: document.querySelector("#showFootprintToggle"),
+      footprintColorInput: document.querySelector("#footprintColorInput"),
+      overviewModeToggle: document.querySelector("#overviewModeToggle"),
       northUpToggle: document.querySelector("#northUpToggle"),
       graticuleToggle: document.querySelector("#graticuleToggle"),
       scaleBarToggle: document.querySelector("#scaleBarToggle"),
@@ -78,31 +87,19 @@ export class App {
       sampleValue: document.querySelector("#sampleValue"),
       tileValue: document.querySelector("#tileValue")
     };
-    this.state = {
-      view: "net",
-      layerId: "",
-      order: 8,
-      maxOrder: 8,
-      colormap: "viridis",
-      scale: "linear",
-      min: -1,
-      max: 1,
-      symlogConstant: 0.03,
-      relief: true,
-      grid: false,
-      axes: false,
-      northUp: false,
-      graticule: false,
-      scaleBar: false,
-      exportEmbedMetadata: true,
-      exportMode: "map",
-      exportScale: 1,
-      exportWidth: "",
-      exportHeight: "",
-      viewPanel: true
-    };
+    this.state = defaultViewerState();
     this.datasetCatalog = null;
     this.datasetId = "";
+    this.resources = new Map();
+    this.panes = [];
+    this.activePaneId = "left";
+    this.splitMode = "single";
+    this.linkCamera = false;
+    this.linkDataset = false;
+    this.linkColorScale = false;
+    this.showFootprint = false;
+    this.footprintColor = "#000000";
+    this.overviewMode = false;
     this.lastUrlWrite = 0;
     this.lastViewPanelUpdate = 0;
     this.pendingCameraUrlValue = null;
@@ -121,37 +118,31 @@ export class App {
     if (new URLSearchParams(window.location.search).has("debug")) {
       window.__hpxApp = this;
     }
-    this.datasetId = selectedDatasetId(this.datasetCatalog);
-    const dataset = this.datasetCatalog.datasets.find((item) => item.id === this.datasetId);
-    this.manifestUrl = new URL(`/datasets/${dataset.manifest}`, window.location.href).href;
-    this.manifest = await loadManifest(this.manifestUrl);
-    this.source = new DirectoryTileSource(this.manifest, this.manifestUrl);
     warmWasmDecoder();
-    this.cache = new TileCache({
-      source: this.source,
-      byteBudget: 384 * 1024 * 1024,
-      maxConcurrentRequests: 24
-    });
-    this.scheduler = new TileScheduler({ cache: this.cache, manifest: this.manifest });
-    this.state.view = this.manifest.defaultView?.mode ?? this.state.view;
-    this.state.layerId = this.manifest.defaultView?.layer ?? this.manifest.layers[0].id;
-    const defaultOrder = this.manifest.defaultView?.order ?? this.manifest.maxOrder;
-    this.state.maxOrder = defaultOrder;
-    this.state.order = defaultOrder;
-    this.state.scale = this.manifest.defaultView?.scale ?? this.state.scale;
-    this.state.colormap = this.manifest.defaultView?.colormap ?? this.state.colormap;
+    this.applySplitUrlState();
+    this.datasetId = selectedDatasetId(this.datasetCatalog);
+    const resource = await this.loadDatasetResource(this.datasetId);
+    const rightDatasetId = rightDatasetIdFromUrl(this.datasetCatalog, this.datasetId);
+    const rightResource = rightDatasetId === this.datasetId
+      ? resource
+      : await this.loadDatasetResource(rightDatasetId);
+    this.useResource(resource);
+    this.state = stateForManifest(this.manifest, this.state);
     this.applyUrlState();
+    this.createPanes(resource, rightResource);
     this.setupControls();
     this.setupRenderers();
+    if (this.overviewMode) {
+      this.applyOverviewMode();
+    }
     installRemoteControl(this);
     this.updateDisplayControls();
-    this.cache.addEventListener("tileload", () => this.updateLoadStatus());
-    this.cache.addEventListener("tileerror", () => this.updateLoadStatus());
     window.addEventListener("resize", () => {
-      this.net.resize();
-      this.globe.resize();
+      for (const pane of this.visiblePanes()) {
+        pane.net?.resize();
+        pane.globe?.resize();
+      }
     });
-    this.controls.datasetStatus.textContent = `${this.manifest.name} / nside ${this.manifest.nside}`;
     this.loop();
   }
 
@@ -178,8 +169,95 @@ npm run dev</pre>
     }
   }
 
+  async loadDatasetResource(datasetId) {
+    const id = String(datasetId || "");
+    const cached = this.resources.get(id);
+    if (cached) {
+      return cached;
+    }
+    const dataset = this.datasetCatalog.datasets.find((item) => item.id === id);
+    if (!dataset) {
+      throw new Error(`Unknown dataset: ${id}`);
+    }
+    const manifestUrl = new URL(`/datasets/${dataset.manifest}`, window.location.href).href;
+    const manifest = await loadManifest(manifestUrl);
+    const source = new DirectoryTileSource(manifest, manifestUrl);
+    const cache = new TileCache({
+      source,
+      byteBudget: 384 * 1024 * 1024,
+      maxConcurrentRequests: 24
+    });
+    const scheduler = new TileScheduler({ cache, manifest });
+    const resource = { datasetId: id, dataset, manifestUrl, manifest, source, cache, scheduler };
+    cache.addEventListener("tileload", () => this.updateLoadStatus());
+    cache.addEventListener("tileerror", () => this.updateLoadStatus());
+    this.resources.set(id, resource);
+    return resource;
+  }
+
+  useResource(resource) {
+    this.datasetId = resource.datasetId;
+    this.manifestUrl = resource.manifestUrl;
+    this.manifest = resource.manifest;
+    this.source = resource.source;
+    this.cache = resource.cache;
+    this.scheduler = resource.scheduler;
+  }
+
+  createPanes(resource, rightResource = resource) {
+    const leftState = this.state;
+    const rightOverrides = rightResource === resource
+      ? { ...this.state }
+      : { ...this.state, layerId: "", min: Number.NaN, max: Number.NaN };
+    const rightState = stateForManifest(rightResource.manifest, rightOverrides);
+    applyPrefixedUrlState(rightState, rightResource.manifest, "right");
+    const left = this.createPane("left", resource, leftState);
+    const right = this.createPane("right", rightResource, rightState);
+    const active = new URLSearchParams(window.location.search).get("pane");
+    this.activePaneId = active === "right" ? "right" : "left";
+    const params = new URLSearchParams(window.location.search);
+    right.pendingCameraUrlValue = params.get("rightCamera");
+    if (this.splitMode === "single" && this.activePaneId === "right" && !right.pendingCameraUrlValue) {
+      right.pendingCameraUrlValue = this.pendingCameraUrlValue;
+    }
+    this.panes = [left, right];
+    this.syncActivePaneAliases(this.activePane());
+  }
+
+  createPane(id, resource, state) {
+    const element = document.querySelector(`[data-pane-id="${id}"]`);
+    if (!element) {
+      throw new Error(`Missing pane element: ${id}`);
+    }
+    const pane = {
+      id,
+      element,
+      label: element.querySelector(".pane-label"),
+      datasetId: resource.datasetId,
+      resource,
+      manifest: resource.manifest,
+      manifestUrl: resource.manifestUrl,
+      source: resource.source,
+      cache: resource.cache,
+      scheduler: resource.scheduler,
+      state,
+      net: null,
+      globe: null,
+      renderStats: null,
+      selectedSample: null,
+      pendingCameraUrlValue: id === "left" ? this.pendingCameraUrlValue : null
+    };
+    element.addEventListener("pointerdown", () => this.setActivePane(id), { capture: true });
+    return pane;
+  }
+
   setupControls() {
     this.root.dataset.view = this.state.view;
+    this.controls.paneGrid.dataset.split = this.splitMode;
+    this.root.dataset.split = this.splitMode;
+    this.controls.splitModeSelect.value = this.splitMode;
+    this.controls.paneSelect.replaceChildren(...paneOptionsForSplit(this.splitMode));
+    this.controls.paneSelect.value = this.activePaneId;
     this.controls.datasetSelect.replaceChildren(
       ...this.datasetCatalog.datasets.map((dataset) => new Option(dataset.title ?? dataset.id, dataset.id))
     );
@@ -199,90 +277,141 @@ npm run dev</pre>
     this.controls.colormapSelect.value = this.state.colormap;
     this.controls.scaleSelect.value = this.state.scale;
 
+    this.controls.splitModeSelect.addEventListener("change", () => {
+      this.setSplitMode(this.controls.splitModeSelect.value);
+      this.writeUrlState();
+    });
+    this.controls.paneSelect.addEventListener("change", () => {
+      this.setActivePane(this.controls.paneSelect.value);
+      this.writeUrlState();
+    });
+    this.controls.linkCameraToggle.addEventListener("change", () => {
+      this.linkCamera = this.controls.linkCameraToggle.checked;
+      this.syncToolbarCheckStyles();
+      if (this.linkCamera) {
+        this.syncLinkedCamera();
+      }
+      this.writeUrlState();
+    });
+    this.controls.linkDatasetToggle.addEventListener("change", () => {
+      this.linkDataset = this.controls.linkDatasetToggle.checked;
+      this.syncToolbarCheckStyles();
+      if (this.linkDataset) {
+        this.copyDatasetToOtherPanes(this.activePane()).catch((error) => this.setViewStatus(errorMessage(error)));
+      }
+      this.writeUrlState();
+    });
+    this.controls.linkColorScaleToggle.addEventListener("change", () => {
+      this.linkColorScale = this.controls.linkColorScaleToggle.checked;
+      this.syncToolbarCheckStyles();
+      if (this.linkColorScale) {
+        this.copyColorScaleToOtherPanes(this.activePane());
+      }
+      this.writeUrlState();
+    });
+    this.controls.showFootprintToggle.addEventListener("change", () => {
+      this.showFootprint = this.controls.showFootprintToggle.checked;
+      this.syncToolbarCheckStyles();
+      this.writeUrlState();
+    });
+    this.controls.footprintColorInput.addEventListener("input", () => {
+      this.footprintColor = normalizeColor(this.controls.footprintColorInput.value, "#000000");
+      this.writeUrlState(true);
+    });
+    this.controls.footprintColorInput.addEventListener("change", () => {
+      this.footprintColor = normalizeColor(this.controls.footprintColorInput.value, "#000000");
+      this.writeUrlState();
+    });
+    this.controls.overviewModeToggle.addEventListener("change", () => {
+      this.overviewMode = this.controls.overviewModeToggle.checked;
+      this.applyOverviewMode();
+      this.syncToolbarCheckStyles();
+      this.writeUrlState();
+    });
     this.controls.datasetSelect.addEventListener("change", () => {
-      const params = new URLSearchParams();
-      params.set("dataset", this.controls.datasetSelect.value);
-      params.set("view", this.state.view);
-      params.set("cmap", this.state.colormap);
-      window.location.href = `${window.location.pathname}?${params.toString()}`;
+      this.setDatasetForActivePane(this.controls.datasetSelect.value)
+        .catch((error) => this.setViewStatus(errorMessage(error)));
     });
     this.controls.viewMode.addEventListener("change", () => {
       this.state.view = this.controls.viewMode.value;
       this.root.dataset.view = this.state.view;
+      this.activePane().element.dataset.view = this.state.view;
+      this.applyLinkedPaneState("view", this.state.view);
       this.writeUrlState();
     });
     this.controls.layerSelect.addEventListener("change", () => {
       this.state.layerId = this.controls.layerSelect.value;
       this.autoStretch();
+      this.copyColorScaleToOtherPanes(this.activePane(), { includeLayer: true });
       this.writeUrlState();
     });
     this.controls.orderSelect.addEventListener("change", () => {
       this.state.maxOrder = Number(this.controls.orderSelect.value);
       const minOrder = this.manifest.minOrder ?? this.manifest.tileShift;
       this.state.order = clampOrder(this.state.order, minOrder, this.state.maxOrder);
+      this.applyLinkedPaneState("maxOrder", this.state.maxOrder);
       this.writeUrlState();
     });
     this.controls.colormapSelect.addEventListener("change", () => {
       this.state.colormap = this.controls.colormapSelect.value;
       this.updateColorbar();
+      this.copyColorScaleToOtherPanes(this.activePane());
       this.writeUrlState();
     });
     this.controls.scaleSelect.addEventListener("change", () => {
       this.state.scale = this.controls.scaleSelect.value;
+      this.copyColorScaleToOtherPanes(this.activePane());
       this.writeUrlState();
     });
     this.controls.minInput.addEventListener("change", () => {
       this.state.min = Number(this.controls.minInput.value);
       this.updateColorbar();
+      this.copyColorScaleToOtherPanes(this.activePane());
       this.writeUrlState();
     });
     this.controls.maxInput.addEventListener("change", () => {
       this.state.max = Number(this.controls.maxInput.value);
       this.updateColorbar();
+      this.copyColorScaleToOtherPanes(this.activePane());
       this.writeUrlState();
     });
     this.controls.autoStretchButton.addEventListener("click", () => {
       this.autoStretch();
+      this.copyColorScaleToOtherPanes(this.activePane());
       this.writeUrlState();
     });
     this.controls.reliefToggle.addEventListener("click", () => {
-      this.state.relief = !this.state.relief;
+      this.setSharedDisplayOption("relief", !this.state.relief);
       this.controls.reliefToggle.setAttribute("aria-pressed", String(this.state.relief));
       this.writeUrlState();
     });
     this.controls.gridToggle.addEventListener("click", () => {
-      this.state.grid = !this.state.grid;
+      this.setSharedDisplayOption("grid", !this.state.grid);
       this.controls.gridToggle.setAttribute("aria-pressed", String(this.state.grid));
       this.writeUrlState();
     });
     this.controls.axesToggle.addEventListener("click", () => {
-      this.state.axes = !this.state.axes;
-      this.globe?.setAxesVisible(this.state.axes);
+      this.setSharedDisplayOption("axes", !this.state.axes);
       this.controls.axesToggle.setAttribute("aria-pressed", String(this.state.axes));
       this.writeUrlState();
     });
     this.controls.northUpToggle.addEventListener("change", () => {
-      this.state.northUp = this.controls.northUpToggle.checked;
-      this.globe?.setNorthUp(this.state.northUp);
+      this.setSharedDisplayOption("northUp", this.controls.northUpToggle.checked);
       this.syncViewOptionStyles();
       this.writeUrlState();
     });
     this.controls.graticuleToggle.addEventListener("change", () => {
-      this.state.graticule = this.controls.graticuleToggle.checked;
-      this.globe?.setGraticuleVisible(this.state.graticule);
+      this.setSharedDisplayOption("graticule", this.controls.graticuleToggle.checked);
       this.syncViewOptionStyles();
       this.writeUrlState();
     });
     this.controls.scaleBarToggle.addEventListener("change", () => {
-      this.state.scaleBar = this.controls.scaleBarToggle.checked;
+      this.setSharedDisplayOption("scaleBar", this.controls.scaleBarToggle.checked);
       this.syncViewOptionStyles();
-      this.root.dataset.scaleBar = String(this.state.scaleBar);
-      this.updateScaleBar();
       this.writeUrlState();
     });
     this.controls.viewPanelToggle.addEventListener("click", () => {
-      this.state.viewPanel = !this.state.viewPanel;
-      this.root.dataset.viewPanel = String(this.state.viewPanel);
+      this.setSharedDisplayOption("viewPanel", !this.state.viewPanel);
       this.controls.viewPanelToggle.setAttribute("aria-pressed", String(this.state.viewPanel));
       this.writeUrlState();
     });
@@ -333,32 +462,414 @@ npm run dev</pre>
   }
 
   setupRenderers() {
-    this.net = new NetRenderer({
-      canvas: document.querySelector("#mapCanvas"),
-      manifest: this.manifest,
-      scheduler: this.scheduler,
-      state: this.state,
-      onHover: (sample) => this.updateInspector(sample),
-      onSelect: (sample) => this.updateSelection(sample)
-    });
-    this.globe = new GlobeRenderer({
-      canvas: document.querySelector("#globeCanvas"),
-      manifest: this.manifest,
-      scheduler: this.scheduler,
-      state: this.state,
-      onHover: (sample) => this.updateInspector(sample),
-      onSelect: (sample) => this.updateSelection(sample)
-    });
-    if (this.pendingCameraUrlValue) {
-      this.globe.applyCameraUrlValue(this.pendingCameraUrlValue);
-      this.pendingCameraUrlValue = null;
+    for (const pane of this.panes) {
+      this.setupPaneRenderers(pane);
     }
-    this.globe.setAxesVisible(this.state.axes);
-    this.globe.setNorthUp(this.state.northUp);
-    this.globe.setGraticuleVisible(this.state.graticule);
+    this.setActivePane(this.activePaneId, { updateControls: false });
+    this.updatePaneLayout();
   }
 
-  setViewState(patch = {}) {
+  setupPaneRenderers(pane) {
+    const mapCanvas = createPaneCanvas("map-canvas", `${pane.id} HEALPix map`);
+    const globeCanvas = createPaneCanvas("globe-canvas", `${pane.id} HEALPix globe`);
+    mapCanvas.id = pane.id === "left" ? "mapCanvas" : "rightMapCanvas";
+    globeCanvas.id = pane.id === "left" ? "globeCanvas" : "rightGlobeCanvas";
+    const label = document.createElement("span");
+    label.className = "pane-label";
+    label.textContent = pane.id === "left" ? "Left" : "Right";
+    const scaleBar = document.createElement("section");
+    scaleBar.className = "pane-scale-bar";
+    scaleBar.setAttribute("aria-label", `${pane.id} scale bar`);
+    const scaleBarLine = document.createElement("div");
+    scaleBarLine.className = "scale-bar-line";
+    const scaleBarValue = document.createElement("strong");
+    scaleBarValue.textContent = "-";
+    scaleBar.append(scaleBarLine, scaleBarValue);
+    const inspector = createPaneInspector(pane.id);
+    pane.element.replaceChildren(mapCanvas, globeCanvas, label, scaleBar, inspector.element);
+    pane.label = label;
+    pane.scaleBarElement = scaleBar;
+    pane.scaleBarLine = scaleBarLine;
+    pane.scaleBarValue = scaleBarValue;
+    pane.inspector = inspector;
+    pane.mapCanvas = mapCanvas;
+    pane.globeCanvas = globeCanvas;
+    pane.element.dataset.view = pane.state.view;
+    pane.net = new NetRenderer({
+      canvas: mapCanvas,
+      manifest: pane.manifest,
+      scheduler: pane.scheduler,
+      state: pane.state,
+      onHover: (sample) => this.updateInspector(sample, pane),
+      onSelect: (sample) => {
+        this.setActivePane(pane.id);
+        this.updateSelection(sample);
+      }
+    });
+    pane.globe = new GlobeRenderer({
+      canvas: globeCanvas,
+      manifest: pane.manifest,
+      scheduler: pane.scheduler,
+      state: pane.state,
+      onHover: (sample) => this.updateInspector(sample, pane),
+      onSelect: (sample) => {
+        this.setActivePane(pane.id);
+        this.updateSelection(sample);
+      }
+    });
+    if (pane.pendingCameraUrlValue) {
+      pane.globe.applyCameraUrlValue(pane.pendingCameraUrlValue);
+      pane.pendingCameraUrlValue = null;
+    }
+    pane.globe.setAxesVisible(pane.state.axes);
+    pane.globe.setNorthUp(pane.state.northUp);
+    pane.globe.setGraticuleVisible(pane.state.graticule);
+  }
+
+  activePane() {
+    return this.panes.find((pane) => pane.id === this.activePaneId) ?? this.panes[0];
+  }
+
+  paneById(id) {
+    return this.panes.find((pane) => pane.id === id) ?? null;
+  }
+
+  visiblePanes() {
+    if (this.splitMode === "single") {
+      return [this.activePane()].filter(Boolean);
+    }
+    return this.panes;
+  }
+
+  setActivePane(id, { updateControls = true } = {}) {
+    const targetId = this.overviewMode && id === "left" ? "right" : id;
+    const pane = this.paneById(targetId);
+    if (!pane) {
+      return;
+    }
+    this.activePaneId = pane.id;
+    this.syncActivePaneAliases(pane);
+    this.updatePaneLayout();
+    if (updateControls) {
+      this.updateDisplayControls();
+    }
+  }
+
+  syncActivePaneAliases(pane = this.activePane()) {
+    if (!pane) {
+      return;
+    }
+    this.useResource(pane.resource);
+    this.state = pane.state;
+    this.net = pane.net;
+    this.globe = pane.globe;
+    this.renderStats = pane.renderStats;
+    this.selectedSample = pane.selectedSample;
+    this.root.dataset.view = pane.state.view;
+    this.root.dataset.scaleBar = String(pane.state.scaleBar);
+  }
+
+  updatePaneLayout() {
+    this.root.dataset.split = this.splitMode;
+    this.controls.paneGrid.dataset.split = this.splitMode;
+    for (const pane of this.panes) {
+      pane.element.classList.toggle("is-active", pane.id === this.activePaneId);
+      pane.element.dataset.view = pane.state.view;
+      pane.element.dataset.scaleBar = String(pane.state.scaleBar);
+      pane.label.textContent = paneTitle(pane.id, this.splitMode, this.overviewMode);
+    }
+    this.controls.paneSelect.replaceChildren(...paneOptionsForSplit(this.splitMode));
+    this.controls.paneSelect.value = this.activePaneId;
+    this.controls.paneSelect.disabled = this.splitMode === "single";
+  }
+
+  setSplitMode(value) {
+    this.splitMode = normalizeSplitMode(value);
+    if (this.splitMode === "single" && !this.activePane()) {
+      this.activePaneId = "left";
+    }
+    this.updatePaneLayout();
+  }
+
+  applySplitUrlState() {
+    const params = new URLSearchParams(window.location.search);
+    this.splitMode = normalizeSplitMode(params.get("split"));
+    this.linkCamera = parseBooleanParam(params.get("linkCamera"), false);
+    this.linkDataset = parseBooleanParam(params.get("linkDataset"), false);
+    this.linkColorScale = parseBooleanParam(params.get("linkColorScale"), false);
+    this.showFootprint = parseBooleanParam(params.get("footprint"), false);
+    this.footprintColor = normalizeColor(params.get("footprintColor"), "#000000");
+    this.overviewMode = parseBooleanParam(params.get("overview"), false);
+    if (this.overviewMode) {
+      if (this.splitMode === "single") {
+        this.splitMode = "vertical";
+      }
+      this.showFootprint = true;
+    }
+  }
+
+  async setDatasetForActivePane(datasetId) {
+    const pane = this.activePane();
+    if (!pane || pane.datasetId === datasetId) {
+      return;
+    }
+    const resource = await this.loadDatasetResource(datasetId);
+    this.assignResourceToPane(pane, resource);
+    this.setupPaneRenderers(pane);
+    this.setActivePane(pane.id);
+    if (this.linkDataset) {
+      await this.copyDatasetToOtherPanes(pane);
+    }
+    this.writeUrlState();
+  }
+
+  assignResourceToPane(pane, resource, overrides = {}) {
+    const previous = pane.state;
+    pane.datasetId = resource.datasetId;
+    pane.resource = resource;
+    pane.manifest = resource.manifest;
+    pane.manifestUrl = resource.manifestUrl;
+    pane.source = resource.source;
+    pane.cache = resource.cache;
+    pane.scheduler = resource.scheduler;
+    pane.state = stateForManifest(resource.manifest, {
+      view: previous.view,
+      colormap: previous.colormap,
+      scale: previous.scale,
+      relief: previous.relief,
+      grid: previous.grid,
+      axes: previous.axes,
+      northUp: previous.northUp,
+      graticule: previous.graticule,
+      scaleBar: previous.scaleBar,
+      viewPanel: previous.viewPanel,
+      exportEmbedMetadata: previous.exportEmbedMetadata,
+      exportMode: previous.exportMode,
+      exportScale: previous.exportScale,
+      exportWidth: previous.exportWidth,
+      exportHeight: previous.exportHeight,
+      ...overrides
+    });
+    pane.renderStats = null;
+    pane.selectedSample = null;
+  }
+
+  async copyDatasetToOtherPanes(sourcePane) {
+    if (!this.linkDataset) {
+      return;
+    }
+    for (const pane of this.panes) {
+      if (pane === sourcePane || pane.datasetId === sourcePane.datasetId) {
+        continue;
+      }
+      this.assignResourceToPane(pane, sourcePane.resource, {
+        layerId: sourcePane.state.layerId,
+        maxOrder: sourcePane.state.maxOrder,
+        order: sourcePane.state.order,
+        min: sourcePane.state.min,
+        max: sourcePane.state.max,
+        relief: sourcePane.state.relief,
+        grid: sourcePane.state.grid,
+        axes: sourcePane.state.axes,
+        northUp: sourcePane.state.northUp,
+        graticule: sourcePane.state.graticule,
+        scaleBar: sourcePane.state.scaleBar,
+        viewPanel: sourcePane.state.viewPanel
+      });
+      this.setupPaneRenderers(pane);
+    }
+  }
+
+  copyColorScaleToOtherPanes(sourcePane, { includeLayer = false } = {}) {
+    if (!this.linkColorScale) {
+      return;
+    }
+    for (const pane of this.panes) {
+      if (pane === sourcePane) {
+        continue;
+      }
+      if (includeLayer && pane.manifest.layers.some((layer) => layer.id === sourcePane.state.layerId)) {
+        pane.state.layerId = sourcePane.state.layerId;
+      }
+      pane.state.colormap = sourcePane.state.colormap;
+      pane.state.scale = sourcePane.state.scale;
+      pane.state.min = sourcePane.state.min;
+      pane.state.max = sourcePane.state.max;
+      pane.state.symlogConstant = sourcePane.state.symlogConstant;
+    }
+  }
+
+  setSharedDisplayOption(key, value) {
+    const next = Boolean(value);
+    for (const pane of this.panes) {
+      pane.state[key] = next;
+      if (key === "axes") {
+        pane.globe?.setAxesVisible(next);
+      } else if (key === "northUp") {
+        pane.globe?.setNorthUp(next);
+      } else if (key === "graticule") {
+        pane.globe?.setGraticuleVisible(next);
+      } else if (key === "scaleBar") {
+        pane.element.dataset.scaleBar = String(next);
+      }
+    }
+    this.syncActivePaneAliases(this.activePane());
+    if (key === "scaleBar") {
+      this.root.dataset.scaleBar = String(next);
+      this.updateScaleBar();
+    } else if (key === "viewPanel") {
+      this.root.dataset.viewPanel = String(next);
+    }
+  }
+
+  applyLinkedPaneState(key, value) {
+    if (key === "view" && this.linkCamera) {
+      for (const pane of this.panes) {
+        if (pane.id !== this.activePaneId) {
+          pane.state.view = value;
+        }
+      }
+    }
+    if (key === "maxOrder" && this.linkDataset) {
+      for (const pane of this.panes) {
+        if (pane.id !== this.activePaneId) {
+          const minOrder = pane.manifest.minOrder ?? pane.manifest.tileShift;
+          pane.state.maxOrder = clampOrder(Number(value), minOrder, pane.manifest.maxOrder);
+          pane.state.order = clampOrder(pane.state.order, minOrder, pane.state.maxOrder);
+        }
+      }
+    }
+  }
+
+  syncLinkedCamera() {
+    if (!this.linkCamera || this.panes.length < 2) {
+      return;
+    }
+    const sourcePane = this.activePane();
+    if (!sourcePane) {
+      return;
+    }
+    for (const pane of this.panes) {
+      if (pane === sourcePane || pane.state.view !== sourcePane.state.view) {
+        continue;
+      }
+      if (sourcePane.state.view === "globe" && sourcePane.globe && pane.globe) {
+        pane.globe.applyViewState(sourcePane.globe.viewState());
+      } else if (sourcePane.state.view === "net" && sourcePane.net && pane.net) {
+        pane.net.transform = { ...sourcePane.net.transform };
+      }
+    }
+  }
+
+  applyOverviewMode() {
+    if (!this.overviewMode) {
+      return;
+    }
+    if (this.splitMode === "single") {
+      this.splitMode = "vertical";
+    }
+    this.showFootprint = true;
+    const left = this.paneById("left");
+    if (left) {
+      left.state.view = "globe";
+      left.globe?.resetView();
+    }
+    this.activePaneId = "right";
+    this.updatePaneLayout();
+  }
+
+  updateFootprintOverlay() {
+    for (const pane of this.panes) {
+      pane.globe?.setFootprintSegments([]);
+    }
+    if (!this.showFootprint || this.splitMode === "single") {
+      return;
+    }
+    const left = this.paneById("left");
+    const right = this.paneById("right");
+    if (!left?.globe || left.state.view !== "globe" || !right) {
+      return;
+    }
+    const renderer = right.state.view === "globe" ? right.globe : right.net;
+    const segments = renderer?.viewportSurfaceSegments?.(32) ?? [];
+    left.globe.setFootprintSegments(segments, this.footprintColor);
+  }
+
+  async setViewState(patch = {}) {
+    if (patch.split !== undefined || patch.splitMode !== undefined || patch.panes !== undefined) {
+      await this.applySplitViewState(patch);
+    } else {
+      await this.applySinglePaneViewState(this.activePane(), patch);
+    }
+    this.updateDisplayControls();
+    this.writeUrlState();
+    return this.stateSnapshot();
+  }
+
+  async applySplitViewState(patch = {}) {
+    this.splitMode = normalizeSplitMode(patch.splitMode ?? patch.split ?? this.splitMode);
+    this.linkCamera = Boolean(patch.linkCamera ?? this.linkCamera);
+    this.linkDataset = Boolean(patch.linkDataset ?? this.linkDataset);
+    this.linkColorScale = Boolean(patch.linkColorScale ?? this.linkColorScale);
+    this.showFootprint = Boolean(patch.showFootprint ?? patch.footprint ?? this.showFootprint);
+    this.footprintColor = normalizeColor(patch.footprintColor, this.footprintColor);
+    this.overviewMode = Boolean(patch.overviewMode ?? patch.overview ?? this.overviewMode);
+    if (this.overviewMode && this.splitMode === "single") {
+      this.splitMode = "vertical";
+      this.showFootprint = true;
+    }
+
+    const panePatches = panePatchEntries(patch.panes);
+    if (panePatches.length) {
+      for (const [paneId, panePatch] of panePatches) {
+        const pane = this.paneById(paneId);
+        if (!pane) {
+          continue;
+        }
+        const datasetId = panePatch.datasetId ?? panePatch.dataset;
+        if (datasetId && datasetId !== pane.datasetId) {
+          const resource = await this.loadDatasetResource(datasetId);
+          this.assignResourceToPane(pane, resource, {
+            layerId: "",
+            min: Number.NaN,
+            max: Number.NaN
+          });
+          this.setupPaneRenderers(pane);
+        }
+        await this.applySinglePaneViewState(pane, panePatch, { update: false });
+      }
+    } else {
+      await this.applySinglePaneViewState(this.activePane(), patch, { update: false });
+    }
+
+    const active = patch.activePaneId ?? patch.paneId ?? patch.pane;
+    this.activePaneId = active === "right" ? "right" : "left";
+    if (this.overviewMode && this.activePaneId === "left") {
+      this.activePaneId = "right";
+    }
+    this.syncActivePaneAliases(this.activePane());
+    this.updatePaneLayout();
+  }
+
+  async applySinglePaneViewState(pane, patch = {}, { update = true } = {}) {
+    if (!pane) {
+      return;
+    }
+    if (patch.paneId === "left" || patch.paneId === "right") {
+      this.setActivePane(patch.paneId);
+      pane = this.activePane();
+    }
+    const datasetId = patch.datasetId ?? patch.dataset;
+    if (datasetId && datasetId !== pane.datasetId) {
+      const resource = await this.loadDatasetResource(datasetId);
+      this.assignResourceToPane(pane, resource, {
+        layerId: "",
+        min: Number.NaN,
+        max: Number.NaN
+      });
+      this.setupPaneRenderers(pane);
+    }
+    this.syncActivePaneAliases(pane);
     const nextLayerId = patch.layerId ?? patch.layer;
     const layerChanged = typeof nextLayerId === "string" && nextLayerId !== this.state.layerId;
     if (layerChanged && this.manifest.layers.some((item) => item.id === nextLayerId)) {
@@ -367,6 +878,7 @@ npm run dev</pre>
     if (patch.view === "globe" || patch.view === "net") {
       this.state.view = patch.view;
       this.root.dataset.view = this.state.view;
+      this.activePane().element.dataset.view = this.state.view;
     }
     const requestedOrder = Number(patch.maxOrder ?? patch.order);
     if (Number.isInteger(requestedOrder)) {
@@ -390,58 +902,99 @@ npm run dev</pre>
       this.autoStretch(false);
     }
     if (patch.relief !== undefined) {
-      this.state.relief = Boolean(patch.relief);
+      this.setSharedDisplayOption("relief", patch.relief);
     }
     if (patch.grid !== undefined) {
-      this.state.grid = Boolean(patch.grid);
+      this.setSharedDisplayOption("grid", patch.grid);
     }
     if (patch.axes !== undefined) {
-      this.state.axes = Boolean(patch.axes);
-      this.globe?.setAxesVisible(this.state.axes);
+      this.setSharedDisplayOption("axes", patch.axes);
     }
     if (patch.northUp !== undefined || patch.north !== undefined) {
-      this.state.northUp = Boolean(patch.northUp ?? patch.north);
-      this.globe?.setNorthUp(this.state.northUp);
+      this.setSharedDisplayOption("northUp", patch.northUp ?? patch.north);
     }
     if (patch.graticule !== undefined) {
-      this.state.graticule = Boolean(patch.graticule);
-      this.globe?.setGraticuleVisible(this.state.graticule);
+      this.setSharedDisplayOption("graticule", patch.graticule);
     }
     if (patch.scaleBar !== undefined || patch.scalebar !== undefined) {
-      this.state.scaleBar = Boolean(patch.scaleBar ?? patch.scalebar);
+      this.setSharedDisplayOption("scaleBar", patch.scaleBar ?? patch.scalebar);
+    }
+    if (patch.viewPanel !== undefined || patch.panel !== undefined) {
+      this.setSharedDisplayOption("viewPanel", patch.viewPanel ?? patch.panel);
     }
     if (patch.camera || patch.centerLonLat || patch.lonLat || patch.position) {
       this.globe?.applyViewState(patch.camera ? patch : { camera: patch });
+    }
+    if (patch.net && this.net) {
+      const scale = Number(patch.net.scale);
+      const offsetX = Number(patch.net.offsetX);
+      const offsetY = Number(patch.net.offsetY);
+      if (Number.isFinite(scale) && Number.isFinite(offsetX) && Number.isFinite(offsetY)) {
+        this.net.transform = { scale, offsetX, offsetY };
+      }
     }
     const symlogConstant = Number(patch.symlogConstant);
     if (Number.isFinite(symlogConstant) && symlogConstant > 0) {
       this.state.symlogConstant = symlogConstant;
     }
-    this.updateDisplayControls();
-    this.writeUrlState();
-    return this.stateSnapshot();
+    this.syncActivePaneAliases(this.activePane());
+    if (update) {
+      this.updateDisplayControls();
+      this.writeUrlState();
+    }
   }
 
   stateSnapshot() {
     return {
       datasetId: this.datasetId,
       manifestUrl: this.manifestUrl,
+      activePaneId: this.activePaneId,
+      splitMode: this.splitMode,
+      footprintColor: this.footprintColor,
       state: { ...this.state },
       viewState: this.currentViewState(),
       renderStats: this.renderStats ? { ...this.renderStats } : null,
       cacheStats: this.cache?.stats?.() ?? null,
+      panes: this.panes.map((pane) => ({
+        id: pane.id,
+        datasetId: pane.datasetId,
+        manifestUrl: pane.manifestUrl,
+        state: { ...pane.state },
+        renderStats: pane.renderStats ? { ...pane.renderStats } : null,
+        cacheStats: pane.cache?.stats?.() ?? null
+      })),
       selection: this.selectionSnapshot(),
       url: window.location.href
     };
   }
 
   loop() {
-    const renderer = this.state.view === "globe" ? this.globe : this.net;
-    this.updateActiveOrder(renderer);
-    const visible = renderer.desiredTiles();
-    this.scheduler.requestVisible(this.state.layerId, visible);
-    renderer.draw();
-    this.renderStats = renderer.stats?.() ?? null;
+    this.syncLinkedCamera();
+    const panes = this.visiblePanes();
+    const schedulerRequests = new Map();
+    for (const pane of panes) {
+      this.syncActivePaneAliases(pane);
+      const renderer = pane.state.view === "globe" ? pane.globe : pane.net;
+      this.updateActiveOrder(renderer);
+      const visible = renderer.desiredTiles();
+      if (!schedulerRequests.has(pane.scheduler)) {
+        schedulerRequests.set(pane.scheduler, []);
+      }
+      schedulerRequests.get(pane.scheduler).push({
+        layerId: pane.state.layerId,
+        targetTiles: visible
+      });
+    }
+    for (const [scheduler, requests] of schedulerRequests) {
+      scheduler.requestVisibleMany(requests);
+    }
+    this.updateFootprintOverlay();
+    for (const pane of panes) {
+      const renderer = pane.state.view === "globe" ? pane.globe : pane.net;
+      renderer.draw();
+      pane.renderStats = renderer.stats?.() ?? null;
+    }
+    this.syncActivePaneAliases(this.activePane());
     this.updateLoadStatus();
     this.updateViewPanel();
     this.updateScaleBar();
@@ -532,25 +1085,50 @@ npm run dev</pre>
     }
     this.lastUrlWrite = now;
     const params = new URLSearchParams();
-    params.set("dataset", this.datasetId);
-    params.set("layer", this.state.layerId);
-    params.set("view", this.state.view);
-    params.set("order", String(this.state.maxOrder));
-    params.set("cmap", this.state.colormap);
-    params.set("scale", this.state.scale);
-    params.set("relief", this.state.relief ? "1" : "0");
-    params.set("grid", this.state.grid ? "1" : "0");
-    params.set("axes", this.state.axes ? "1" : "0");
-    params.set("north", this.state.northUp ? "1" : "0");
-    params.set("graticule", this.state.graticule ? "1" : "0");
-    params.set("scalebar", this.state.scaleBar ? "1" : "0");
-    params.set("panel", this.state.viewPanel ? "1" : "0");
-    params.set("min", formatNumber(this.state.min));
-    params.set("max", formatNumber(this.state.max));
-    if (this.state.view === "globe" && this.globe) {
-      params.set("camera", this.globe.cameraUrlValue());
+    const basePane = this.splitMode === "single"
+      ? this.activePane()
+      : this.paneById("left") ?? this.activePane();
+    params.set("split", this.splitMode);
+    params.set("pane", this.activePaneId);
+    params.set("dataset", basePane.datasetId);
+    params.set("layer", basePane.state.layerId);
+    params.set("view", basePane.state.view);
+    params.set("order", String(basePane.state.maxOrder));
+    params.set("cmap", basePane.state.colormap);
+    params.set("scale", basePane.state.scale);
+    params.set("relief", basePane.state.relief ? "1" : "0");
+    params.set("grid", basePane.state.grid ? "1" : "0");
+    params.set("axes", basePane.state.axes ? "1" : "0");
+    params.set("north", basePane.state.northUp ? "1" : "0");
+    params.set("graticule", basePane.state.graticule ? "1" : "0");
+    params.set("scalebar", basePane.state.scaleBar ? "1" : "0");
+    params.set("panel", basePane.state.viewPanel ? "1" : "0");
+    params.set("linkCamera", this.linkCamera ? "1" : "0");
+    params.set("linkDataset", this.linkDataset ? "1" : "0");
+    params.set("linkColorScale", this.linkColorScale ? "1" : "0");
+    params.set("footprint", this.showFootprint ? "1" : "0");
+    params.set("footprintColor", this.footprintColor);
+    params.set("overview", this.overviewMode ? "1" : "0");
+    params.set("min", formatNumber(basePane.state.min));
+    params.set("max", formatNumber(basePane.state.max));
+    if (basePane.state.view === "globe" && basePane.globe) {
+      params.set("camera", basePane.globe.cameraUrlValue());
     }
     const current = new URLSearchParams(window.location.search);
+    const right = this.paneById("right");
+    if (right && this.splitMode !== "single") {
+      params.set("rightDataset", right.datasetId);
+      params.set("rightLayer", right.state.layerId);
+      params.set("rightView", right.state.view);
+      params.set("rightOrder", String(right.state.maxOrder));
+      params.set("rightCmap", right.state.colormap);
+      params.set("rightScale", right.state.scale);
+      params.set("rightMin", formatNumber(right.state.min));
+      params.set("rightMax", formatNumber(right.state.max));
+      if (right.state.view === "globe" && right.globe) {
+        params.set("rightCamera", right.globe.cameraUrlValue());
+      }
+    }
     if (current.has("remote")) {
       params.set("remote", current.get("remote") || "1");
     }
@@ -562,7 +1140,26 @@ npm run dev</pre>
   }
 
   updateDisplayControls() {
+    this.syncActivePaneAliases(this.activePane());
+    this.controls.splitModeSelect.value = this.splitMode;
+    this.controls.paneSelect.replaceChildren(...paneOptionsForSplit(this.splitMode));
+    this.controls.paneSelect.value = this.activePaneId;
+    this.controls.datasetSelect.value = this.datasetId;
+    const paneName = paneTitle(this.activePaneId, this.splitMode, this.overviewMode);
+    this.controls.datasetStatus.textContent = `${this.manifest.name} / nside ${this.manifest.nside} / ${paneName}`;
+    this.controls.viewMode.value = this.state.view;
+    this.controls.layerSelect.replaceChildren(
+      ...this.manifest.layers.map((layer) => new Option(layer.title ?? layer.id, layer.id))
+    );
+    this.controls.layerSelect.value = this.state.layerId;
+    const minOrder = this.manifest.minOrder ?? this.manifest.tileShift;
+    this.controls.orderSelect.replaceChildren();
+    for (let order = minOrder; order <= this.manifest.maxOrder; order += 1) {
+      this.controls.orderSelect.append(new Option(`order ${order} / nside ${2 ** order}`, String(order)));
+    }
     this.controls.orderSelect.value = String(this.state.maxOrder);
+    this.controls.colormapSelect.value = this.state.colormap;
+    this.controls.scaleSelect.value = this.state.scale;
     this.controls.minInput.value = String(this.state.min);
     this.controls.maxInput.value = String(this.state.max);
     this.controls.reliefToggle.setAttribute("aria-pressed", String(this.state.relief));
@@ -577,9 +1174,26 @@ npm run dev</pre>
     this.controls.viewPanelToggle.setAttribute("aria-pressed", String(this.state.viewPanel));
     this.root.dataset.viewPanel = String(this.state.viewPanel);
     this.root.dataset.scaleBar = String(this.state.scaleBar);
+    this.updatePaneLayout();
+    this.syncToolbarCheckStyles();
     this.updateColorbar();
     this.updateViewPanel(true);
     this.updateScaleBar();
+  }
+
+  syncToolbarCheckStyles() {
+    const pairs = [
+      [this.controls.linkCameraToggle, this.linkCamera],
+      [this.controls.linkDatasetToggle, this.linkDataset],
+      [this.controls.linkColorScaleToggle, this.linkColorScale],
+      [this.controls.showFootprintToggle, this.showFootprint],
+      [this.controls.overviewModeToggle, this.overviewMode]
+    ];
+    this.controls.footprintColorInput.value = this.footprintColor;
+    for (const [control, checked] of pairs) {
+      control.checked = Boolean(checked);
+      syncCheckField(control);
+    }
   }
 
   autoStretch(updateInputs = true) {
@@ -641,32 +1255,57 @@ npm run dev</pre>
     }
   }
 
-  currentViewState() {
-    const rendererState = this.state.view === "globe"
-      ? this.globe?.viewState()
+  paneViewState(pane) {
+    const rendererState = pane.state.view === "globe"
+      ? pane.globe?.viewState()
       : {
           net: {
-            scale: this.net?.transform.scale ?? null,
-            offsetX: this.net?.transform.offsetX ?? null,
-            offsetY: this.net?.transform.offsetY ?? null
+            scale: pane.net?.transform.scale ?? null,
+            offsetX: pane.net?.transform.offsetX ?? null,
+            offsetY: pane.net?.transform.offsetY ?? null
           }
         };
     return {
-      datasetId: this.datasetId,
-      layerId: this.state.layerId,
-      view: this.state.view,
-      order: this.state.maxOrder,
-      colormap: this.state.colormap,
-      scale: this.state.scale,
-      min: this.state.min,
-      max: this.state.max,
-      relief: this.state.relief,
-      grid: this.state.grid,
-      axes: this.state.axes,
-      northUp: this.state.northUp,
-      graticule: this.state.graticule,
-      scaleBar: this.state.scaleBar,
+      paneId: pane.id,
+      datasetId: pane.datasetId,
+      layerId: pane.state.layerId,
+      view: pane.state.view,
+      order: pane.state.maxOrder,
+      colormap: pane.state.colormap,
+      scale: pane.state.scale,
+      min: pane.state.min,
+      max: pane.state.max,
+      relief: pane.state.relief,
+      grid: pane.state.grid,
+      axes: pane.state.axes,
+      northUp: pane.state.northUp,
+      graticule: pane.state.graticule,
+      scaleBar: pane.state.scaleBar,
+      viewPanel: pane.state.viewPanel,
       ...rendererState
+    };
+  }
+
+  currentViewState() {
+    const active = this.activePane();
+    const activeState = this.paneViewState(active);
+    const panes = Object.fromEntries(this.panes.map((pane) => [pane.id, this.paneViewState(pane)]));
+    return {
+      type: "hpxviewer:view",
+      version: 2,
+      split: this.splitMode,
+      splitMode: this.splitMode,
+      activePaneId: this.activePaneId,
+      linkCamera: this.linkCamera,
+      linkDataset: this.linkDataset,
+      linkColorScale: this.linkColorScale,
+      footprint: this.showFootprint,
+      showFootprint: this.showFootprint,
+      footprintColor: this.footprintColor,
+      overview: this.overviewMode,
+      overviewMode: this.overviewMode,
+      ...activeState,
+      panes
     };
   }
 
@@ -692,7 +1331,7 @@ npm run dev</pre>
       : "Applied camera view.");
   }
 
-  applyViewJson() {
+  async applyViewJson() {
     let parsed;
     try {
       parsed = JSON.parse(this.controls.viewJsonInput.value);
@@ -701,10 +1340,14 @@ npm run dev</pre>
       return;
     }
     this.viewInputsDirty = false;
-    this.setViewState(parsed);
-    this.updateViewPanel(true);
-    this.writeUrlState();
-    this.setViewStatus("Applied view JSON.");
+    try {
+      await this.setViewState(parsed);
+      this.updateViewPanel(true);
+      this.writeUrlState();
+      this.setViewStatus("Applied view JSON.");
+    } catch (error) {
+      this.setViewStatus(`Apply failed: ${errorMessage(error)}`);
+    }
   }
 
   viewInputControls() {
@@ -741,27 +1384,56 @@ npm run dev</pre>
   }
 
   currentViewPython() {
+    const leftPane = this.splitMode === "single" ? this.activePane() : this.paneById("left") ?? this.activePane();
+    const rightPane = this.paneById("right");
+    const leftState = this.paneViewState(leftPane);
     const args = [
-      pythonLiteral(this.datasetId),
-      `layer=${pythonLiteral(this.state.layerId)}`,
-      `view=${pythonLiteral(this.state.view)}`,
-      `order=${this.state.maxOrder}`,
-      `cmap=${pythonLiteral(this.state.colormap)}`,
-      `scale=${pythonLiteral(this.state.scale)}`,
-      `min=${formatPythonNumber(this.state.min)}`,
-      `max=${formatPythonNumber(this.state.max)}`,
-      `relief=${pythonLiteral(this.state.relief)}`,
-      `grid=${pythonLiteral(this.state.grid)}`
+      pythonLiteral(leftState.datasetId),
+      `layer=${pythonLiteral(leftState.layerId)}`,
+      `view=${pythonLiteral(leftState.view)}`,
+      `order=${leftState.order}`,
+      `cmap=${pythonLiteral(leftState.colormap)}`,
+      `scale=${pythonLiteral(leftState.scale)}`,
+      `min=${formatPythonNumber(leftState.min)}`,
+      `max=${formatPythonNumber(leftState.max)}`,
+      `relief=${pythonLiteral(leftState.relief)}`,
+      `grid=${pythonLiteral(leftState.grid)}`
     ];
     const extra = [
-      `axes=${pythonLiteral(this.state.axes)}`,
-      `north=${pythonLiteral(this.state.northUp)}`,
-      `graticule=${pythonLiteral(this.state.graticule)}`,
-      `scalebar=${pythonLiteral(this.state.scaleBar)}`,
-      `panel=${pythonLiteral(this.state.viewPanel)}`
+      `axes=${pythonLiteral(leftState.axes)}`,
+      `north=${pythonLiteral(leftState.northUp)}`,
+      `graticule=${pythonLiteral(leftState.graticule)}`,
+      `scalebar=${pythonLiteral(leftState.scaleBar)}`,
+      `panel=${pythonLiteral(leftState.viewPanel)}`
     ];
-    if (this.state.view === "globe" && this.globe) {
-      extra.push(`camera=${pythonLiteral(this.globe.cameraUrlValue())}`);
+    if (leftPane.state.view === "globe" && leftPane.globe) {
+      extra.push(`camera=${pythonLiteral(leftPane.globe.cameraUrlValue())}`);
+    }
+    if (this.splitMode !== "single" && rightPane) {
+      extra.unshift(
+        `split=${pythonLiteral(this.splitMode)}`,
+        `pane=${pythonLiteral(this.activePaneId)}`,
+        `linkCamera=${pythonLiteral(this.linkCamera)}`,
+        `linkDataset=${pythonLiteral(this.linkDataset)}`,
+        `linkColorScale=${pythonLiteral(this.linkColorScale)}`,
+        `footprint=${pythonLiteral(this.showFootprint)}`,
+        `footprintColor=${pythonLiteral(this.footprintColor)}`,
+        `overview=${pythonLiteral(this.overviewMode)}`
+      );
+      const rightState = this.paneViewState(rightPane);
+      extra.push(
+        `rightDataset=${pythonLiteral(rightState.datasetId)}`,
+        `rightLayer=${pythonLiteral(rightState.layerId)}`,
+        `rightView=${pythonLiteral(rightState.view)}`,
+        `rightOrder=${rightState.order}`,
+        `rightCmap=${pythonLiteral(rightState.colormap)}`,
+        `rightScale=${pythonLiteral(rightState.scale)}`,
+        `rightMin=${formatPythonNumber(rightState.min)}`,
+        `rightMax=${formatPythonNumber(rightState.max)}`
+      );
+      if (rightPane.state.view === "globe" && rightPane.globe) {
+        extra.push(`rightCamera=${pythonLiteral(rightPane.globe.cameraUrlValue())}`);
+      }
     }
     return [
       "from hpxviewer import Viewer",
@@ -778,8 +1450,21 @@ npm run dev</pre>
 
   openExportDialog(format = "png") {
     const extension = format === "jpeg" ? "jpg" : format;
+    const splitOption = this.controls.exportDialogModeSelect.querySelector('option[value="split"]');
+    const leftOption = this.controls.exportDialogModeSelect.querySelector('option[value="left"]');
+    const rightOption = this.controls.exportDialogModeSelect.querySelector('option[value="right"]');
+    if (splitOption) {
+      splitOption.disabled = this.splitMode === "single";
+    }
+    if (leftOption) {
+      leftOption.disabled = this.splitMode === "single";
+    }
+    if (rightOption) {
+      rightOption.disabled = this.splitMode === "single";
+    }
+    const defaultMode = this.splitMode === "single" ? "active" : "split";
     this.controls.exportFormatSelect.value = extension === "jpg" ? "jpg" : "png";
-    this.controls.exportDialogModeSelect.value = this.state.exportMode;
+    this.controls.exportDialogModeSelect.value = defaultMode;
     this.controls.exportDialogScaleSelect.value = String(this.state.exportScale);
     this.controls.exportDialogWidthInput.value = this.state.exportWidth;
     this.controls.exportDialogHeightInput.value = this.state.exportHeight;
@@ -831,13 +1516,12 @@ npm run dev</pre>
   }
 
   async exportCurrentImage() {
-    const renderer = this.state.view === "globe" ? this.globe : this.net;
     const format = this.controls.exportFormatSelect.value;
     const width = Number(this.controls.exportDialogWidthInput.value);
     const height = Number(this.controls.exportDialogHeightInput.value);
     const transparent = this.controls.exportDialogTransparentToggle.checked;
     const embedMetadata = this.controls.exportDialogMetadataToggle.checked;
-    renderer.draw();
+    this.drawVisiblePanes();
     this.controls.exportSaveButton.disabled = true;
     this.setExportStatus("Preparing image...");
     try {
@@ -851,7 +1535,7 @@ npm run dev</pre>
         embedMetadata,
         filename: this.controls.exportFilenameInput.value
       });
-      this.state.exportMode = this.controls.exportDialogModeSelect.value;
+      this.state.exportMode = normalizeExportMode(this.controls.exportDialogModeSelect.value);
       this.state.exportScale = Number(this.controls.exportDialogScaleSelect.value);
       this.state.exportWidth = this.controls.exportDialogWidthInput.value;
       this.state.exportHeight = this.controls.exportDialogHeightInput.value;
@@ -868,10 +1552,9 @@ npm run dev</pre>
   }
 
   async exportImageDataUrl(options = {}) {
-    const renderer = this.state.view === "globe" ? this.globe : this.net;
-    renderer.draw();
+    this.drawVisiblePanes();
     const { blob, extension, width, height } = await renderExportBlob(this, {
-      mode: options.mode ?? this.state.exportMode,
+      mode: options.mode ?? normalizeExportMode(this.state.exportMode),
       format: options.format ?? "png",
       scale: options.scale ?? this.state.exportScale,
       width: options.width ?? null,
@@ -889,7 +1572,16 @@ npm run dev</pre>
     };
   }
 
+  drawVisiblePanes() {
+    for (const pane of this.visiblePanes()) {
+      const renderer = pane.state.view === "globe" ? pane.globe : pane.net;
+      renderer?.draw?.();
+    }
+    this.syncActivePaneAliases(this.activePane());
+  }
+
   updateScaleBar() {
+    this.updatePaneScaleBars();
     if (!this.state.scaleBar || this.state.view !== "globe" || !this.globe) {
       return;
     }
@@ -905,6 +1597,24 @@ npm run dev</pre>
     this.controls.scaleBarValue.textContent = formatScaleDistance(distance, scale.unit);
   }
 
+  updatePaneScaleBars() {
+    for (const pane of this.visiblePanes()) {
+      if (!pane.scaleBarLine || !pane.scaleBarValue || !pane.state.scaleBar || pane.state.view !== "globe" || !pane.globe) {
+        continue;
+      }
+      const scale = pane.globe.surfaceScalePerPixel(120);
+      if (!Number.isFinite(scale.valuePerPixel) || scale.valuePerPixel <= 0) {
+        pane.scaleBarValue.textContent = "-";
+        continue;
+      }
+      const maxPixels = 150;
+      const distance = niceDistance(scale.valuePerPixel * maxPixels);
+      const width = Math.max(36, Math.min(maxPixels, distance / scale.valuePerPixel));
+      pane.scaleBarLine.style.width = `${width.toFixed(1)}px`;
+      pane.scaleBarValue.textContent = formatScaleDistance(distance, scale.unit);
+    }
+  }
+
   updateActiveOrder(renderer) {
     const minOrder = this.manifest.minOrder ?? this.manifest.tileShift;
     const nextOrder = renderer.detailOrder
@@ -913,33 +1623,47 @@ npm run dev</pre>
     this.state.order = clampOrder(nextOrder, minOrder, this.state.maxOrder);
   }
 
-  updateInspector(sample) {
+  updateInspector(sample, pane = this.activePane()) {
+    const targets = [this.controls];
+    if (pane?.inspector) {
+      targets.push(pane.inspector);
+    }
+    this.renderInspector(sample, targets);
+  }
+
+  renderInspector(sample, targets) {
     if (sample?.selectionType === "tiles") {
       const coverage = sample.coverage;
-      this.controls.cellValue.textContent = "tiles";
-      this.controls.faceValue.textContent = coverage?.faces?.join(", ") ?? "-";
-      this.controls.localValue.textContent = coverage?.order === null ? "multi-order" : `order ${coverage?.order}`;
-      this.controls.lonLatValue.textContent = "-";
-      this.controls.sampleValue.textContent = `${coverage?.tileCount ?? 0} tiles`;
-      this.controls.tileValue.textContent = `${coverage?.rangeCount ?? 0} ranges`;
+      for (const target of targets) {
+        target.cellValue.textContent = "tiles";
+        target.faceValue.textContent = coverage?.faces?.join(", ") ?? "-";
+        target.localValue.textContent = coverage?.order === null ? "multi-order" : `order ${coverage?.order}`;
+        target.lonLatValue.textContent = "-";
+        target.sampleValue.textContent = `${coverage?.tileCount ?? 0} tiles`;
+        target.tileValue.textContent = `${coverage?.rangeCount ?? 0} ranges`;
+      }
       return;
     }
     if (!sample) {
-      this.controls.cellValue.textContent = "-";
-      this.controls.faceValue.textContent = "-";
-      this.controls.localValue.textContent = "-";
-      this.controls.lonLatValue.textContent = "-";
-      this.controls.sampleValue.textContent = "-";
-      this.controls.tileValue.textContent = "-";
+      for (const target of targets) {
+        target.cellValue.textContent = "-";
+        target.faceValue.textContent = "-";
+        target.localValue.textContent = "-";
+        target.lonLatValue.textContent = "-";
+        target.sampleValue.textContent = "-";
+        target.tileValue.textContent = "-";
+      }
       return;
     }
     const lonLat = sample.lonLat ?? cellToLonLat(sample.cell);
-    this.controls.cellValue.textContent = String(sample.nestedId);
-    this.controls.faceValue.textContent = String(sample.cell.face);
-    this.controls.localValue.textContent = `${sample.cell.ix}, ${sample.cell.iy}`;
-    this.controls.lonLatValue.textContent = `${lonLat.lon.toFixed(3)}, ${lonLat.lat.toFixed(3)}`;
-    this.controls.sampleValue.textContent = Number.isFinite(sample.value) ? sample.value.toFixed(6) : "loading";
-    this.controls.tileValue.textContent = sample.tileKey;
+    for (const target of targets) {
+      target.cellValue.textContent = String(sample.nestedId);
+      target.faceValue.textContent = String(sample.cell.face);
+      target.localValue.textContent = `${sample.cell.ix}, ${sample.cell.iy}`;
+      target.lonLatValue.textContent = `${lonLat.lon.toFixed(3)}, ${lonLat.lat.toFixed(3)}`;
+      target.sampleValue.textContent = Number.isFinite(sample.value) ? sample.value.toFixed(6) : "loading";
+      target.tileValue.textContent = sample.tileKey;
+    }
   }
 
   updateSelection(sample) {
@@ -948,6 +1672,10 @@ npm run dev</pre>
     }
     this.updateInspector(sample);
     this.selectedSample = serializeSelection(sample, this);
+    const pane = this.activePane();
+    if (pane) {
+      pane.selectedSample = this.selectedSample;
+    }
     broadcastSelection(this.selectedSample);
     persistSelection(this.selectedSample);
   }
@@ -957,10 +1685,217 @@ npm run dev</pre>
   }
 }
 
+function defaultViewerState() {
+  return {
+    view: "net",
+    layerId: "",
+    order: null,
+    maxOrder: null,
+    colormap: "viridis",
+    scale: "linear",
+    min: -1,
+    max: 1,
+    symlogConstant: 0.03,
+    relief: true,
+    grid: false,
+    axes: false,
+    northUp: false,
+    graticule: false,
+    scaleBar: false,
+    exportEmbedMetadata: true,
+    exportMode: "active",
+    exportScale: 1,
+    exportWidth: "",
+    exportHeight: "",
+    viewPanel: true
+  };
+}
+
+function stateForManifest(manifest, overrides = {}) {
+  const state = { ...defaultViewerState(), ...overrides };
+  const defaultLayer = manifest.defaultView?.layer ?? manifest.layers[0]?.id ?? "";
+  if (!manifest.layers.some((layer) => layer.id === state.layerId)) {
+    state.layerId = manifest.layers.some((layer) => layer.id === defaultLayer)
+      ? defaultLayer
+      : manifest.layers[0]?.id ?? "";
+  }
+  state.view = state.view === "globe" || state.view === "net"
+    ? state.view
+    : manifest.defaultView?.mode ?? "net";
+  state.scale = state.scale === "linear" || state.scale === "log" || state.scale === "symlog"
+    ? state.scale
+    : manifest.defaultView?.scale ?? "linear";
+  state.colormap = String(state.colormap || manifest.defaultView?.colormap || "viridis");
+  const minOrder = manifest.minOrder ?? manifest.tileShift;
+  const defaultOrder = manifest.defaultView?.order ?? manifest.maxOrder;
+  state.maxOrder = clampOrder(Number(state.maxOrder ?? defaultOrder), minOrder, manifest.maxOrder);
+  state.order = clampOrder(Number(state.order ?? state.maxOrder), minOrder, state.maxOrder);
+  if (!Number.isFinite(Number(state.min)) || !Number.isFinite(Number(state.max)) || Number(state.max) <= Number(state.min)) {
+    applyLayerRange(state, manifest);
+  }
+  return state;
+}
+
+function applyLayerRange(state, manifest) {
+  const layer = manifest.layers.find((item) => item.id === state.layerId);
+  const percentiles = layer?.stats?.percentiles;
+  state.min = Number(percentiles?.["1"] ?? layer?.stats?.min ?? -1);
+  state.max = Number(percentiles?.["99"] ?? layer?.stats?.max ?? 1);
+}
+
+function createPaneCanvas(className, label) {
+  const canvas = document.createElement("canvas");
+  canvas.className = className;
+  canvas.setAttribute("aria-label", label);
+  return canvas;
+}
+
+function createPaneInspector(id) {
+  const element = document.createElement("section");
+  element.className = "pane-inspector";
+  element.setAttribute("aria-label", `${id} cell inspector`);
+  element.innerHTML = `
+    <div class="pane-inspector-head">
+      <span>Inspector</span>
+    </div>
+    <dl>
+      <div><dt>Cell</dt><dd data-field="cell">-</dd></div>
+      <div><dt>Face</dt><dd data-field="face">-</dd></div>
+      <div><dt>Local</dt><dd data-field="local">-</dd></div>
+      <div><dt>Lon/Lat</dt><dd data-field="lonLat">-</dd></div>
+      <div><dt>Value</dt><dd data-field="sample">-</dd></div>
+      <div><dt>Tile</dt><dd data-field="tile">-</dd></div>
+    </dl>
+  `;
+  return {
+    element,
+    cellValue: element.querySelector('[data-field="cell"]'),
+    faceValue: element.querySelector('[data-field="face"]'),
+    localValue: element.querySelector('[data-field="local"]'),
+    lonLatValue: element.querySelector('[data-field="lonLat"]'),
+    sampleValue: element.querySelector('[data-field="sample"]'),
+    tileValue: element.querySelector('[data-field="tile"]')
+  };
+}
+
+function normalizeSplitMode(value) {
+  if (value === "vertical" || value === "horizontal") {
+    return value;
+  }
+  return "single";
+}
+
+function paneOptionsForSplit(splitMode) {
+  if (splitMode === "horizontal") {
+    return [
+      new Option("Top", "left"),
+      new Option("Bottom", "right")
+    ];
+  }
+  return [
+    new Option("Left", "left"),
+    new Option("Right", "right")
+  ];
+}
+
+function paneTitle(id, splitMode, overviewMode) {
+  if (overviewMode) {
+    return id === "left" ? "Overview" : "Detail";
+  }
+  if (splitMode === "horizontal") {
+    return id === "left" ? "Top" : "Bottom";
+  }
+  return id === "left" ? "Left" : "Right";
+}
+
+function panePatchEntries(panes) {
+  if (!panes) {
+    return [];
+  }
+  if (Array.isArray(panes)) {
+    return panes
+      .map((pane) => [pane?.paneId ?? pane?.id, pane])
+      .filter(([id, pane]) => (id === "left" || id === "right") && pane && typeof pane === "object");
+  }
+  if (typeof panes === "object") {
+    return Object.entries(panes)
+      .filter(([id, pane]) => (id === "left" || id === "right") && pane && typeof pane === "object");
+  }
+  return [];
+}
+
+function parseBooleanParam(value, fallback = false) {
+  if (value === "1" || value === "true") {
+    return true;
+  }
+  if (value === "0" || value === "false") {
+    return false;
+  }
+  return fallback;
+}
+
+function normalizeColor(value, fallback = "#000000") {
+  const color = String(value ?? "").trim();
+  return /^#[0-9a-fA-F]{6}$/.test(color) ? color.toLowerCase() : fallback;
+}
+
+function normalizeExportMode(value) {
+  return ["active", "left", "right", "split"].includes(value) ? value : "active";
+}
+
+function rightDatasetIdFromUrl(catalog, fallback) {
+  const params = new URLSearchParams(window.location.search);
+  const requested = params.get("rightDataset");
+  return requested && catalog.datasets.some((dataset) => dataset.id === requested)
+    ? requested
+    : fallback;
+}
+
+function applyPrefixedUrlState(state, manifest, prefix) {
+  const params = new URLSearchParams(window.location.search);
+  const get = (name) => params.get(`${prefix}${name}`);
+  const layer = get("Layer");
+  if (layer && manifest.layers.some((item) => item.id === layer)) {
+    state.layerId = layer;
+  }
+  const view = get("View");
+  if (view === "globe" || view === "net") {
+    state.view = view;
+  }
+  const orderText = get("Order");
+  const order = Number(orderText);
+  if (orderText !== null && Number.isInteger(order)) {
+    const minOrder = manifest.minOrder ?? manifest.tileShift;
+    state.maxOrder = clampOrder(order, minOrder, manifest.maxOrder);
+    state.order = state.maxOrder;
+  }
+  const colormap = get("Cmap");
+  if (colormap) {
+    state.colormap = colormap;
+  }
+  const scale = get("Scale");
+  if (scale === "linear" || scale === "log" || scale === "symlog") {
+    state.scale = scale;
+  }
+  const minText = get("Min");
+  const maxText = get("Max");
+  if (minText !== null || maxText !== null) {
+    const min = Number(minText);
+    const max = Number(maxText);
+    if (Number.isFinite(min) && Number.isFinite(max) && max > min) {
+      state.min = min;
+      state.max = max;
+    } else {
+      applyLayerRange(state, manifest);
+    }
+  }
+}
+
 function serializeSelection(sample, app) {
   const base = {
     type: "hpxviewer:selected",
     selectedAt: new Date().toISOString(),
+    paneId: app.activePaneId,
     datasetId: app.datasetId,
     layerId: app.state.layerId,
     view: app.state.view,
@@ -1145,7 +2080,7 @@ function errorMessage(error) {
 }
 
 function syncCheckField(control) {
-  const field = control.closest(".check-field");
+  const field = control.closest(".check-field, .toolbar-check");
   field?.classList.toggle("is-checked", control.checked);
   field?.classList.toggle("is-disabled", control.disabled);
 }

@@ -8,19 +8,26 @@ export class TileScheduler {
   }
 
   requestVisible(layerId, targetTiles) {
+    this.requestVisibleMany([{ layerId, targetTiles }]);
+  }
+
+  requestVisibleMany(requests) {
     const wanted = new Set();
-    targetTiles.forEach((tile, index) => {
-      let current = tile;
-      let distance = 0;
-      while (current) {
-        wanted.add(this.cache.cacheKey(layerId, current));
-        if (!this.cache.has(layerId, current)) {
-          this.cache.request(layerId, current, 1000 - index - distance * 100).catch(() => {});
+    for (const request of requests) {
+      const layerId = request.layerId;
+      request.targetTiles.forEach((tile, index) => {
+        let current = tile;
+        let distance = 0;
+        while (current) {
+          wanted.add(this.cache.cacheKey(layerId, current));
+          if (!this.cache.has(layerId, current)) {
+            this.cache.request(layerId, current, 1000 - index - distance * 100).catch(() => {});
+          }
+          current = parentTile(current, this.minOrder);
+          distance += 1;
         }
-        current = parentTile(current, this.minOrder);
-        distance += 1;
-      }
-    });
+      });
+    }
     this.cache.cancelUnwanted(wanted);
   }
 

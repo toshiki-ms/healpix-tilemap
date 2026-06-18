@@ -7,15 +7,42 @@
     <link rel="stylesheet" href="./src/styles.css" />
   </head>
   <body>
-    <main class="app-shell" aria-label="HEALPix tile map viewer">
-      <canvas id="mapCanvas" class="map-canvas" aria-label="HEALPix map"></canvas>
-      <canvas id="globeCanvas" class="globe-canvas" aria-label="HEALPix globe"></canvas>
+    <main class="app-shell" data-split="single" aria-label="HEALPix tile map viewer">
+      <section id="paneGrid" class="pane-grid" data-split="single" aria-label="map panes">
+        <div class="viewer-pane is-active" data-pane-id="left" data-view="net">
+          <canvas id="mapCanvas" class="map-canvas" aria-label="Left HEALPix map"></canvas>
+          <canvas id="globeCanvas" class="globe-canvas" aria-label="Left HEALPix globe"></canvas>
+          <span class="pane-label">Left</span>
+        </div>
+        <div class="viewer-pane" data-pane-id="right" data-view="net">
+          <canvas id="rightMapCanvas" class="map-canvas" aria-label="Right HEALPix map"></canvas>
+          <canvas id="rightGlobeCanvas" class="globe-canvas" aria-label="Right HEALPix globe"></canvas>
+          <span class="pane-label">Right</span>
+        </div>
+      </section>
 
       <section class="toolbar" aria-label="viewer controls">
         <div class="brand">
           <h1>HEALPix Tile Map</h1>
           <span id="datasetStatus">Loading dataset</span>
         </div>
+
+        <label>
+          Split
+          <select id="splitModeSelect">
+            <option value="single">Single</option>
+            <option value="vertical">Left / Right</option>
+            <option value="horizontal">Top / Bottom</option>
+          </select>
+        </label>
+
+        <label>
+          Pane
+          <select id="paneSelect">
+            <option value="left">Left</option>
+            <option value="right">Right</option>
+          </select>
+        </label>
 
         <label>
           Dataset
@@ -74,6 +101,30 @@
         <button id="gridToggle" type="button" aria-pressed="true">Grid</button>
         <button id="axesToggle" type="button" aria-pressed="false" title="Show HEALPix/geographic XYZ axes">Axes</button>
         <button id="viewPanelToggle" type="button" aria-pressed="true">View</button>
+        <label class="toolbar-check" title="Copy active camera changes to the other pane">
+          <input id="linkCameraToggle" type="checkbox" />
+          <span>Camera</span>
+        </label>
+        <label class="toolbar-check" title="Use the active pane dataset in both panes">
+          <input id="linkDatasetToggle" type="checkbox" />
+          <span>Dataset</span>
+        </label>
+        <label class="toolbar-check" title="Copy active colormap, scale, min, and max to the other pane">
+          <input id="linkColorScaleToggle" type="checkbox" />
+          <span>Color</span>
+        </label>
+        <label class="toolbar-check" title="Draw the right pane footprint on the left globe">
+          <input id="showFootprintToggle" type="checkbox" />
+          <span>Footprint</span>
+        </label>
+        <label class="toolbar-color" title="Footprint outline color">
+          <span>Outline</span>
+          <input id="footprintColorInput" type="color" value="#000000" />
+        </label>
+        <label class="toolbar-check" title="Use left as overview and right as detail">
+          <input id="overviewModeToggle" type="checkbox" />
+          <span>Overview</span>
+        </label>
         <button id="resetViewButton" type="button">Reset</button>
       </section>
 
@@ -139,12 +190,12 @@
             </select>
           </label>
           <label>
-            Content
+            Target
             <select id="exportDialogModeSelect">
-              <option value="map">Map</option>
-              <option value="figure">Map + colorbar</option>
-              <option value="annotated">Map + inspector</option>
-              <option value="viewer">Viewer</option>
+              <option value="active">Active pane</option>
+              <option value="left">Left / top pane</option>
+              <option value="right">Right / bottom pane</option>
+              <option value="split">Split panes</option>
             </select>
           </label>
           <label>

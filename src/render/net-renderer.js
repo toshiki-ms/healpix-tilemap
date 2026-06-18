@@ -1,5 +1,11 @@
 import { cellToNestedId } from "../core/healpix-nested.js";
-import { faceUvToNet, netToFaceUv, vectorToLonLat, faceUvToVector } from "../core/projection.js";
+import {
+  faceUvToNet,
+  faceUvToVector,
+  healpixVectorToDisplayVector,
+  netToFaceUv,
+  vectorToLonLat
+} from "../core/projection.js";
 import {
   cellFromFaceUv,
   enumerateTiles,
@@ -16,6 +22,7 @@ import {
   isTileSelectionPointer
 } from "./region-selection.js";
 import { sampleTileValue, tileCanvas } from "./tile-visual.js";
+import { viewportSurfaceSegments } from "./viewport-footprint.js";
 
 const NET_BOUNDS = Object.freeze({ minX: -1.1, maxX: 8.1, minY: -0.08, maxY: 4.08 });
 
@@ -387,6 +394,51 @@ export class NetRenderer {
 
   tileAt(clientX, clientY) {
     return this.inspectAt(clientX, clientY)?.targetTile ?? null;
+  }
+
+  surfaceDisplayVectorAtScreenPoint(clientX, clientY) {
+    const net = this.screenToNet(clientX, clientY);
+    const faceUv = netToFaceUv(net.x, net.y);
+    if (!faceUv) {
+      return null;
+    }
+    return healpixVectorToDisplayVector(faceUvToVector(faceUv.face, faceUv.u, faceUv.v));
+  }
+
+  viewportSurfaceSegments(samplesPerEdge = 32) {
+    const segments = viewportSurfaceSegments(
+      this.canvas,
+      samplesPerEdge,
+      (clientX, clientY) => this.surfaceDisplayVectorAtScreenPoint(clientX, clientY)
+    );
+    return segments.length ? segments : this.visibleTileSurfaceSegments();
+  }
+
+  visibleTileSurfaceSegments(maxTiles = 128) {
+    const tiles = (this.visibleTiles?.length ? this.visibleTiles : this.desiredTiles()).slice(0, maxTiles);
+    return tiles.map((tile) => tileSurfaceSegment(tile, this.manifest.tileShift, 6));
+  }
+}
+
+function tileSurfaceSegment(tile, tileShift, samplesPerEdge = 6) {
+  const bounds = tileBounds(tile, tileShift);
+  const points = [];
+  addTileEdge(points, tile.face, bounds.u0, bounds.v0, bounds.u1, bounds.v0, samplesPerEdge);
+  addTileEdge(points, tile.face, bounds.u1, bounds.v0, bounds.u1, bounds.v1, samplesPerEdge);
+  addTileEdge(points, tile.face, bounds.u1, bounds.v1, bounds.u0, bounds.v1, samplesPerEdge);
+  addTileEdge(points, tile.face, bounds.u0, bounds.v1, bounds.u0, bounds.v0, samplesPerEdge);
+  points.push(points[0]);
+  return points;
+}
+
+function addTileEdge(points, face, u0, v0, u1, v1, samples) {
+  for (let i = 0; i < samples; i += 1) {
+    const t = i / samples;
+    points.push(healpixVectorToDisplayVector(faceUvToVector(
+      face,
+      u0 + (u1 - u0) * t,
+      v0 + (v1 - v0) * t
+    )));
   }
 }
 

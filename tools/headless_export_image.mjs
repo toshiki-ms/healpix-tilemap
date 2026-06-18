@@ -229,9 +229,14 @@ async function waitForViewer(page, timeoutMs) {
       function tick() {
         const app = window.__hpxApp;
         const status = document.querySelector("#datasetStatus")?.textContent || "";
-        const pending = app?.cache?.stats?.().pending ?? 0;
-        const visible = app?.renderStats?.visible ?? 0;
-        if (app?.exportImageDataUrl && status && !status.includes("Loading") && visible > 0 && pending === 0) {
+        const panes = app?.visiblePanes?.() ?? [];
+        const pending = panes.length
+          ? panes.reduce((total, pane) => total + (pane.cache?.stats?.().pending ?? 0), 0)
+          : app?.cache?.stats?.().pending ?? 0;
+        const readyPanes = panes.length
+          ? panes.every((pane) => (pane.renderStats?.visible ?? 0) > 0)
+          : (app?.renderStats?.visible ?? 0) > 0;
+        if (app?.exportImageDataUrl && status && !status.includes("Loading") && readyPanes && pending === 0) {
           settledFrames += 1;
           if (settledFrames >= 3) {
             resolve(true);

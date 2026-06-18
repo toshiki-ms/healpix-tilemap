@@ -29,16 +29,25 @@ export async function exportImage(
 
 export async function renderExportBlob(
   app,
-  { mode = "map", format = "png", scale = 1, width = null, height = null, transparent = false, embedMetadata = true } = {}
+  { mode = "active", format = "png", scale = 1, width = null, height = null, transparent = false, embedMetadata = true } = {}
 ) {
-  const source = app.state.view === "globe" ? app.globe.canvas : app.net.canvas;
+  const target = exportTarget(app, mode);
+  const splitExport = target.kind === "split";
+  const pane = target.pane;
+  const source = splitExport ? app.controls.paneGrid : paneCanvas(pane);
   const rect = source.getBoundingClientRect();
   const exportScale = Math.max(1, Math.min(4, Number(scale) || 1));
-  const sourceAspect = source.width / Math.max(1, source.height);
+  const sourcePixelWidth = splitExport
+    ? Math.max(1, Math.round(rect.width * Math.min(window.devicePixelRatio || 1, 2)))
+    : source.width;
+  const sourcePixelHeight = splitExport
+    ? Math.max(1, Math.round(rect.height * Math.min(window.devicePixelRatio || 1, 2)))
+    : source.height;
+  const sourceAspect = sourcePixelWidth / Math.max(1, sourcePixelHeight);
   const requestedWidth = Number(width);
   const requestedHeight = Number(height);
-  let outputWidth = Math.max(1, Math.round(source.width * exportScale));
-  let outputHeight = Math.max(1, Math.round(source.height * exportScale));
+  let outputWidth = Math.max(1, Math.round(sourcePixelWidth * exportScale));
+  let outputHeight = Math.max(1, Math.round(sourcePixelHeight * exportScale));
   if (Number.isFinite(requestedWidth) && requestedWidth > 0 && Number.isFinite(requestedHeight) && requestedHeight > 0) {
     outputWidth = Math.round(requestedWidth);
     outputHeight = Math.round(requestedHeight);
@@ -59,30 +68,28 @@ export async function renderExportBlob(
     context.fillStyle = "#202326";
     context.fillRect(0, 0, outputWidth, outputHeight);
   }
-  context.drawImage(source, 0, 0, outputWidth, outputHeight);
+  if (splitExport) {
+    drawSplitPanes(context, app, outputWidth, outputHeight);
+  } else {
+    context.drawImage(source, 0, 0, outputWidth, outputHeight);
+  }
   if (transparentPng) {
     makeBackgroundTransparent(context, outputWidth, outputHeight);
   }
 
   const pixelScale = outputWidth / Math.max(1, rect.width);
-  if (mode === "figure" || mode === "annotated" || mode === "viewer") {
-    drawColorbar(context, app, outputWidth, outputHeight, pixelScale);
+  if (!splitExport) {
+    drawPaneColorbar(context, pane, outputWidth, outputHeight, pixelScale);
   }
-  if (mode === "annotated" || mode === "viewer") {
-    drawInspector(context, app, outputWidth, outputHeight, pixelScale);
-  }
-  if (mode === "viewer") {
-    drawToolbar(context, app, outputWidth, pixelScale);
-  }
-  if (app.state.scaleBar && app.state.view === "globe") {
-    drawScaleBar(context, app, outputWidth, outputHeight, pixelScale);
+  if (!splitExport && pane.state.scaleBar && pane.state.view === "globe") {
+    drawPaneScaleBar(context, pane, outputWidth, outputHeight, pixelScale);
   }
 
   const extension = mime === "image/jpeg" ? "jpg" : "png";
   let blob = await canvasToBlob(canvas, mime, 0.92);
   if (embedMetadata) {
     blob = await embedImageMetadata(blob, extension, imageMetadata(app, {
-      mode,
+      target: target.id,
       format: extension,
       scale: exportScale,
       width: outputWidth,
@@ -91,6 +98,155 @@ export async function renderExportBlob(
     }));
   }
   return { blob, extension, width: outputWidth, height: outputHeight };
+}
+
+function exportTarget(app, requested = "active") {
+  const visiblePanes = app.visiblePanes?.() ?? [];
+  const active = app.activePane?.() ?? visiblePanes[0];
+  if (requested === "split" && app.splitMode !== "single" && visiblePanes.length > 1) {
+    return { kind: "split", id: "split", pane: active };
+  }
+  if (app.splitMode === "single") {
+    return { kind: "pane", id: "active", pane: active };
+  }
+  if (requested === "left") {
+    return { kind: "pane", id: "left", pane: app.paneById?.("left") ?? active };
+  }
+  if (requested === "right") {
+    return { kind: "pane", id: "right", pane: app.paneById?.("right") ?? active };
+  }
+  return { kind: "pane", id: "active", pane: active };
+}
+
+function paneCanvas(pane) {
+  return pane.state.view === "globe" ? pane.globe.canvas : pane.net.canvas;
+}
+
+function drawSplitPanes(context, app, width, height) {
+  const gridRect = app.controls.paneGrid.getBoundingClientRect();
+  const scaleX = width / Math.max(1, gridRect.width);
+  const scaleY = height / Math.max(1, gridRect.height);
+  const panes = app.visiblePanes?.() ?? [];
+  context.save();
+  context.fillStyle = "#202326";
+  context.fillRect(0, 0, width, height);
+  for (const pane of panes) {
+    const paneRect = pane.element.getBoundingClientRect();
+    const box = {
+      x: (paneRect.left - gridRect.left) * scaleX,
+      y: (paneRect.top - gridRect.top) * scaleY,
+      width: paneRect.width * scaleX,
+      height: paneRect.height * scaleY
+    };
+    const canvas = pane.state.view === "globe" ? pane.globe.canvas : pane.net.canvas;
+    context.fillStyle = "#202326";
+    context.fillRect(box.x, box.y, box.width, box.height);
+    context.drawImage(canvas, box.x, box.y, box.width, box.height);
+    drawSplitPaneLabel(context, pane, box, Math.min(scaleX, scaleY));
+    drawSplitPaneColorbar(context, pane, box, Math.min(scaleX, scaleY));
+    if (pane.state.scaleBar && pane.state.view === "globe") {
+      drawSplitPaneScaleBar(context, pane, box, Math.min(scaleX, scaleY));
+    }
+  }
+  drawSplitSeparators(context, app, width, height);
+  context.restore();
+}
+
+function drawSplitPaneLabel(context, pane, box, scale) {
+  const title = paneLabelText(pane);
+  const x = box.x + 12 * scale;
+  const y = box.y + 12 * scale;
+  const paddingX = 9 * scale;
+  const h = 28 * scale;
+  context.save();
+  context.font = `650 ${12 * scale}px Inter, system-ui, sans-serif`;
+  const w = Math.min(box.width - 24 * scale, context.measureText(title).width + paddingX * 2);
+  drawPanel(context, x, y, w, h, 6 * scale);
+  context.fillStyle = "#f3f0e8";
+  clippedText(context, title, x + paddingX, y + 18 * scale, w - paddingX * 2);
+  context.restore();
+}
+
+function drawSplitPaneColorbar(context, pane, box, scale) {
+  const w = Math.min(300 * scale, box.width - 28 * scale);
+  if (w < 96 * scale) {
+    return;
+  }
+  const h = 52 * scale;
+  const x = box.x + box.width - w - 14 * scale;
+  const y = box.y + box.height - h - 14 * scale;
+  drawPanel(context, x, y, w, h, 7 * scale);
+  const rampX = x + 10 * scale;
+  const rampY = y + 10 * scale;
+  const rampW = w - 20 * scale;
+  const rampH = 12 * scale;
+  const gradient = context.createLinearGradient(rampX, 0, rampX + rampW, 0);
+  for (let i = 0; i <= 16; i += 1) {
+    const [r, g, b] = sampleColormap(pane.state.colormap, i / 16);
+    gradient.addColorStop(i / 16, `rgb(${r} ${g} ${b})`);
+  }
+  context.fillStyle = gradient;
+  roundRect(context, rampX, rampY, rampW, rampH, 4 * scale);
+  context.fill();
+  context.fillStyle = "#c8c1b3";
+  context.font = `${10 * scale}px SFMono-Regular, Consolas, monospace`;
+  context.textAlign = "left";
+  context.fillText(formatNumber(pane.state.min), rampX, y + 38 * scale);
+  context.textAlign = "right";
+  context.fillText(formatNumber(pane.state.max), rampX + rampW, y + 38 * scale);
+  context.textAlign = "left";
+}
+
+function drawSplitPaneScaleBar(context, pane, box, scale) {
+  const label = pane.scaleBarValue?.textContent || "";
+  const cssWidth = parseFloat(pane.scaleBarLine?.style.width) || 96;
+  const barWidth = cssWidth * scale;
+  const x = box.x + (box.width - barWidth) * 0.5;
+  const y = box.y + box.height - 36 * scale;
+  context.save();
+  context.strokeStyle = "#f6f1e7";
+  context.lineWidth = Math.max(2, 2 * scale);
+  context.beginPath();
+  context.moveTo(x, y);
+  context.lineTo(x, y + 8 * scale);
+  context.lineTo(x + barWidth, y + 8 * scale);
+  context.lineTo(x + barWidth, y);
+  context.stroke();
+  context.fillStyle = "#f6f1e7";
+  context.font = `650 ${11 * scale}px Inter, system-ui, sans-serif`;
+  context.textAlign = "center";
+  context.fillText(label, x + barWidth * 0.5, y + 24 * scale);
+  context.restore();
+}
+
+function drawPaneColorbar(context, pane, width, height, scale) {
+  drawSplitPaneColorbar(context, pane, { x: 0, y: 0, width, height }, scale);
+}
+
+function drawPaneScaleBar(context, pane, width, height, scale) {
+  drawSplitPaneScaleBar(context, pane, { x: 0, y: 0, width, height }, scale);
+}
+
+function drawSplitSeparators(context, app, width, height) {
+  if (app.splitMode === "vertical") {
+    context.strokeStyle = "rgba(243, 240, 232, 0.3)";
+    context.lineWidth = 1;
+    context.beginPath();
+    context.moveTo(width * 0.5, 0);
+    context.lineTo(width * 0.5, height);
+    context.stroke();
+  } else if (app.splitMode === "horizontal") {
+    context.strokeStyle = "rgba(243, 240, 232, 0.3)";
+    context.lineWidth = 1;
+    context.beginPath();
+    context.moveTo(0, height * 0.5);
+    context.lineTo(width, height * 0.5);
+    context.stroke();
+  }
+}
+
+function paneLabelText(pane) {
+  return pane.label?.textContent || (pane.id === "left" ? "Overview" : "Detail");
 }
 
 export async function exportMetadata(app) {
@@ -277,7 +433,8 @@ function clippedText(context, text, x, y, maxWidth) {
 function exportFileName(app, extension) {
   const stamp = new Date().toISOString().replace(/[-:]/g, "").replace(/\..+$/, "Z");
   const clean = (value) => String(value).replace(/[^a-zA-Z0-9_.-]+/g, "-");
-  return `healpix-tilemap_${clean(app.datasetId)}_${clean(app.state.layerId)}_o${app.state.maxOrder}_${stamp}.${extension}`;
+  const split = app.splitMode && app.splitMode !== "single" ? `_${clean(app.splitMode)}` : "";
+  return `healpix-tilemap${split}_${clean(app.datasetId)}_${clean(app.state.layerId)}_o${app.state.maxOrder}_${stamp}.${extension}`;
 }
 
 function imageMetadata(app, exportOptions) {
@@ -303,7 +460,29 @@ function imageMetadata(app, exportOptions) {
       unit: layer?.unit ?? ""
     },
     export: exportOptions,
-    viewState: app.currentViewState()
+    viewState: app.currentViewState(),
+    split: {
+      mode: app.splitMode ?? "single",
+      activePaneId: app.activePaneId ?? "left",
+      overview: Boolean(app.overviewMode),
+      footprint: Boolean(app.showFootprint),
+      footprintColor: app.footprintColor ?? "#000000",
+      panes: (app.panes ?? []).map((pane) => ({
+        id: pane.id,
+        datasetId: pane.datasetId,
+        manifestUrl: pane.manifestUrl,
+        state: { ...pane.state },
+        viewState: pane.state.view === "globe"
+          ? pane.globe?.viewState?.() ?? null
+          : {
+              net: {
+                scale: pane.net?.transform.scale ?? null,
+                offsetX: pane.net?.transform.offsetX ?? null,
+                offsetY: pane.net?.transform.offsetY ?? null
+              }
+            }
+      }))
+    }
   };
 }
 

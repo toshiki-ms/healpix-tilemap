@@ -404,8 +404,9 @@ npm run dev</pre>
     const stats = this.cache.stats();
     const renderStats = this.renderStats;
     const visible = renderStats ? ` · ${renderStats.visible} visible` : "";
+    const orders = renderStats?.orderCounts ? ` · ${formatOrderCounts(renderStats.orderCounts)}` : "";
     const loading = stats.pending > 0 ? ` · ${stats.pending} loading` : "";
-    this.controls.loadStatus.textContent = `LOD ${this.state.order}/${this.state.maxOrder}${visible}${loading}`;
+    this.controls.loadStatus.textContent = `LOD ${this.state.order}/${this.state.maxOrder}${visible}${orders}${loading}`;
   }
 
   updateActiveOrder(renderer) {
@@ -523,6 +524,13 @@ function formatNumber(value) {
     return value.toExponential(3);
   }
   return value.toFixed(4).replace(/0+$/, "").replace(/\.$/, "");
+}
+
+function formatOrderCounts(counts) {
+  return Object.entries(counts)
+    .sort((a, b) => Number(a[0]) - Number(b[0]))
+    .map(([order, count]) => `o${order}:${count}`)
+    .join(" ");
 }
 
 function escapeHtml(value) {

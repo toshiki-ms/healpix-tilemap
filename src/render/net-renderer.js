@@ -101,6 +101,7 @@ export class NetRenderer {
     const ctx = this.context;
     const rect = this.canvas.getBoundingClientRect();
     this.renderStats = emptyRenderStats(this.visibleTiles.length);
+    this.renderStats.orderCounts = orderCounts(this.visibleTiles);
     ctx.setTransform(this.pixelRatio, 0, 0, this.pixelRatio, 0, 0);
     ctx.fillStyle = "#202326";
     ctx.fillRect(0, 0, rect.width, rect.height);
@@ -399,11 +400,20 @@ function tileBleed(p00, p10, p01) {
 function emptyRenderStats(visible = 0) {
   return {
     visible,
+    orderCounts: {},
     exact: 0,
     approximate: 0,
     missing: visible,
     maxSourceOrder: null
   };
+}
+
+function orderCounts(tiles) {
+  const counts = {};
+  for (const tile of tiles) {
+    counts[tile.order] = (counts[tile.order] ?? 0) + 1;
+  }
+  return counts;
 }
 
 function updateRenderStats(stats, resolved, targetTile) {

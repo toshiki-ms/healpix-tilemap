@@ -30,11 +30,17 @@ export class DirectoryTileSource {
     const layer = this.layer(layerId);
     const response = await fetch(this.tileUrl(layerId, tile), { signal });
     if (!response.ok) {
+      if (response.status === 404 && layer.source?.sparse) {
+        return sparseTileData({ layer, manifest: this.manifest, layerId, tile });
+      }
       throw new Error(`Tile ${tileKey(tile)} returned ${response.status}`);
     }
     const buffer = await response.arrayBuffer();
     const expectedBytes = this.manifest.tileSize * this.manifest.tileSize * bytesPerSample(layer.dtype);
     if (buffer.byteLength !== expectedBytes) {
+      if (layer.source?.sparse) {
+        return sparseTileData({ layer, manifest: this.manifest, layerId, tile });
+      }
       throw new Error(
         `Tile ${tileKey(tile)} has ${buffer.byteLength} bytes, expected ${expectedBytes}`
       );
@@ -49,4 +55,36 @@ export class DirectoryTileSource {
       imageCache: new Map()
     };
   }
+}
+
+function sparseTileData({ layer, manifest, layerId, tile }) {
+  const count = manifest.tileSize * manifest.tileSize;
+  const values = emptyValues(layer, count);
+  return {
+    key: tileKey(tile),
+    layerId,
+    tile: { ...tile },
+    values,
+    encoding: valueEncoding(layer),
+    bytes: values.byteLength,
+    imageCache: new Map(),
+    sparseEmpty: true
+  };
+}
+
+function emptyValues(layer, count) {
+  const empty = layer.emptyValue;
+  if (layer.dtype === "float32") {
+    const values = new Float32Array(count);
+    values.fill(Number(empty) === 0 ? 0 : Number.NaN);
+    return values;
+  }
+  const values = arrayForDtype(layer.dtype, new ArrayBuffer(count * bytesPerSample(layer.dtype)));
+  const nodata = valueEncoding(layer).nodata;
+  if (Number.isFinite(Number(empty))) {
+    values.fill(Number(empty));
+  } else if (nodata !== null) {
+    values.fill(nodata);
+  }
+  return values;
 }

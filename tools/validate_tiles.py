@@ -27,6 +27,7 @@ def validate_manifest(manifest_path: Path) -> int:
     checked = 0
     for layer in manifest["layers"]:
         template = layer["source"]["template"]
+        sparse = bool(layer.get("source", {}).get("sparse"))
         expected_bytes = tile_size * tile_size * bytes_per_sample(layer.get("dtype", "float32"))
         for order in range(min_order, max_order + 1):
             grid = max(1, 2 ** max(0, order - int(manifest["tileShift"])))
@@ -36,7 +37,8 @@ def validate_manifest(manifest_path: Path) -> int:
                         rel = template.format(order=order, face=face, x=x, y=y)
                         path = root / rel
                         if not path.exists():
-                            missing.append(str(path))
+                            if not sparse:
+                                missing.append(str(path))
                             continue
                         size = path.stat().st_size
                         if size != expected_bytes:

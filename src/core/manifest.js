@@ -34,6 +34,17 @@ export function validateManifest(manifest) {
   if (!Array.isArray(manifest.layers) || manifest.layers.length === 0) {
     throw new Error("Manifest must define at least one layer.");
   }
+  if (manifest.body !== undefined) {
+    if (!manifest.body || typeof manifest.body !== "object") {
+      throw new Error("Manifest field body must be an object when present.");
+    }
+    if (manifest.body.radiusKm !== undefined) {
+      const radiusKm = Number(manifest.body.radiusKm);
+      if (!Number.isFinite(radiusKm) || radiusKm <= 0) {
+        throw new Error("Manifest field body.radiusKm must be a positive number.");
+      }
+    }
+  }
   for (const layer of manifest.layers) {
     if (!layer.id || !layer.source?.template) {
       throw new Error("Each layer must define id and source.template.");

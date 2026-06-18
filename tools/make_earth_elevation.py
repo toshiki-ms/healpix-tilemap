@@ -137,6 +137,11 @@ def main() -> None:
         "tileSize": args.tile_size,
         "tileLayout": "face-local-row-major",
         "description": f"{source_grid.description} sampled onto a HEALPix tile pyramid.",
+        "body": {
+            "name": "Earth",
+            "radiusKm": 6371.0088,
+            "radiusReference": "IUGG mean Earth radius",
+        },
         "defaultView": {
             "mode": "globe",
             "layer": "elevation_m",

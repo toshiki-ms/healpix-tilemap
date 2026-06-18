@@ -72,7 +72,110 @@
         <button id="autoStretchButton" type="button">Auto</button>
         <button id="reliefToggle" type="button" aria-pressed="true">Relief</button>
         <button id="gridToggle" type="button" aria-pressed="true">Grid</button>
+        <button id="axesToggle" type="button" aria-pressed="false" title="Show HEALPix/geographic XYZ axes">Axes</button>
+        <button id="viewPanelToggle" type="button" aria-pressed="true">View</button>
         <button id="resetViewButton" type="button">Reset</button>
+      </section>
+
+      <section class="view-panel" aria-label="view state">
+        <div class="panel-head">
+          <span>View</span>
+          <div>
+            <button id="copyViewButton" type="button" title="Copy the current view state as JSON">Copy JSON</button>
+            <button id="copyUrlButton" type="button" title="Copy a URL that restores the current view">Copy URL</button>
+            <button id="copyPythonButton" type="button" title="Copy a Jupyter Viewer snippet for this view">Copy Python</button>
+          </div>
+        </div>
+        <p id="viewStatus" class="view-status" aria-live="polite"></p>
+        <dl>
+          <div><dt>Camera XYZ (display)</dt><dd id="cameraPositionValue">-</dd></div>
+          <div><dt>Target XYZ (display)</dt><dd id="cameraTargetValue">-</dd></div>
+          <div><dt>Center Lon/Lat</dt><dd id="viewCenterValue">-</dd></div>
+          <div><dt>Vector XYZ (Z-up)</dt><dd id="viewVectorValue" title="Surface center in display XYZ; +Z is north">-</dd></div>
+        </dl>
+        <div class="view-fields">
+          <label>Lon<input id="viewLonInput" type="number" step="0.0001" /></label>
+          <label>Lat<input id="viewLatInput" type="number" step="0.0001" /></label>
+          <label>Distance<input id="viewDistanceInput" type="number" step="0.001" /></label>
+          <label>FOV<input id="viewFovInput" type="number" step="0.1" min="1" max="179.9" /></label>
+        </div>
+        <div class="view-toggles">
+          <label class="check-field" title="Keep local geographic north upward">
+            <input id="northUpToggle" type="checkbox" />
+            <span>North</span>
+          </label>
+          <label class="check-field" title="Show longitude/latitude guide lines">
+            <input id="graticuleToggle" type="checkbox" />
+            <span>Graticule</span>
+          </label>
+          <label class="check-field" title="Show approximate Earth-equivalent scale bar">
+            <input id="scaleBarToggle" type="checkbox" />
+            <span>Scale</span>
+          </label>
+        </div>
+        <div class="view-actions">
+          <button id="applyJsonButton" type="button">Apply JSON</button>
+          <button id="exportMetadataButton" type="button" title="Save the current view state as a JSON file">Save JSON</button>
+          <button id="openExportButton" type="button">Save Image</button>
+        </div>
+        <textarea id="viewJsonInput" rows="4" spellcheck="false" aria-label="view JSON"></textarea>
+      </section>
+
+      <section id="exportDialog" class="export-dialog" aria-label="export image options" hidden>
+        <div class="panel-head">
+          <span>Export Image</span>
+          <button id="exportCancelButton" type="button">Cancel</button>
+        </div>
+        <label>
+          File name
+          <input id="exportFilenameInput" type="text" spellcheck="false" />
+        </label>
+        <div class="export-dialog-grid">
+          <label>
+            Format
+            <select id="exportFormatSelect">
+              <option value="png">PNG</option>
+              <option value="jpg">JPG</option>
+            </select>
+          </label>
+          <label>
+            Content
+            <select id="exportDialogModeSelect">
+              <option value="map">Map</option>
+              <option value="figure">Map + colorbar</option>
+              <option value="annotated">Map + inspector</option>
+              <option value="viewer">Viewer</option>
+            </select>
+          </label>
+          <label>
+            Scale
+            <select id="exportDialogScaleSelect">
+              <option value="1">1x</option>
+              <option value="2">2x</option>
+              <option value="4">4x</option>
+            </select>
+          </label>
+          <label>
+            Width
+            <input id="exportDialogWidthInput" type="number" min="64" step="1" placeholder="auto" />
+          </label>
+          <label>
+            Height
+            <input id="exportDialogHeightInput" type="number" min="64" step="1" placeholder="auto" />
+          </label>
+        </div>
+        <div class="export-dialog-actions">
+          <label class="check-field">
+            <input id="exportDialogMetadataToggle" type="checkbox" checked />
+            <span>Embed metadata</span>
+          </label>
+          <label class="check-field">
+            <input id="exportDialogTransparentToggle" type="checkbox" />
+            <span>Transparent PNG</span>
+          </label>
+          <button id="exportSaveButton" type="button">Save</button>
+        </div>
+        <p id="exportStatus" class="export-status" aria-live="polite"></p>
       </section>
 
       <section class="inspector" aria-label="cell inspector">
@@ -96,6 +199,11 @@
           <span id="colorMin">-</span>
           <span id="colorMax">-</span>
         </div>
+      </section>
+
+      <section class="scale-bar" aria-label="scale bar">
+        <div id="scaleBarLine" class="scale-bar-line"></div>
+        <strong id="scaleBarValue">-</strong>
       </section>
     </main>
 

@@ -9,6 +9,7 @@ from urllib.parse import urlencode
 import urllib.error
 import urllib.request
 
+from .paths import repo_root
 from .selection import TileSelection
 from .server import start_viewer
 
@@ -210,6 +211,67 @@ class Viewer:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
+        return output_path
+
+    def save_image(
+        self,
+        output: str | Path,
+        *,
+        mode: str = "figure",
+        format: str | None = None,
+        scale: int = 1,
+        width: int | None = None,
+        height: int | None = None,
+        viewport_width: int = 1280,
+        viewport_height: int = 900,
+        transparent: bool = False,
+        embed_metadata: bool = True,
+        start_server: bool = True,
+        timeout: float = 60.0,
+        chrome: str | None = None,
+    ) -> Path:
+        """Render the current view to an image without showing a browser window.
+
+        The implementation starts or reuses the local viewer server, opens the
+        viewer in headless Chrome, then calls the same browser-side export path
+        as the interactive ``Save Image`` dialog.
+        """
+
+        output_path = Path(output).expanduser().resolve()
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        export_format = format or output_path.suffix.lstrip(".") or "png"
+        script = repo_root() / "tools" / "headless_export_image.mjs"
+        command = [
+            "node",
+            str(script),
+            "--url",
+            self.url(start_server=start_server),
+            "--output",
+            str(output_path),
+            "--mode",
+            mode,
+            "--format",
+            export_format,
+            "--scale",
+            str(scale),
+            "--viewport-width",
+            str(viewport_width),
+            "--viewport-height",
+            str(viewport_height),
+            "--timeout",
+            str(timeout),
+        ]
+        if width is not None:
+            command.extend(["--width", str(width)])
+        if height is not None:
+            command.extend(["--height", str(height)])
+        if transparent:
+            command.append("--transparent")
+        if not embed_metadata:
+            command.append("--no-metadata")
+        if chrome:
+            command.extend(["--chrome", chrome])
+        subprocess.run(command, check=True, cwd=repo_root())
         return output_path
 
     def _repr_html_(self) -> str:

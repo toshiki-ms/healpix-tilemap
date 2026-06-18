@@ -9,8 +9,11 @@ import { GlobeRenderer } from "../render/globe-renderer.js";
 import { clampOrder } from "../render/lod.js";
 import { NetRenderer } from "../render/net-renderer.js";
 import { installRemoteControl } from "../remote/viewer-control.js";
+import { defaultExportFileName, exportImage, exportMetadata, renderExportBlob } from "./export-image.js";
 
 const DATASET_INDEX_URL = "/datasets/index.json";
+const MIN_CAMERA_FOV = 1;
+const MAX_CAMERA_FOV = 179.9;
 
 export class App {
   constructor(root = document.querySelector(".app-shell")) {
@@ -29,10 +32,45 @@ export class App {
       autoStretchButton: document.querySelector("#autoStretchButton"),
       reliefToggle: document.querySelector("#reliefToggle"),
       gridToggle: document.querySelector("#gridToggle"),
+      axesToggle: document.querySelector("#axesToggle"),
+      northUpToggle: document.querySelector("#northUpToggle"),
+      graticuleToggle: document.querySelector("#graticuleToggle"),
+      scaleBarToggle: document.querySelector("#scaleBarToggle"),
+      viewPanelToggle: document.querySelector("#viewPanelToggle"),
       resetViewButton: document.querySelector("#resetViewButton"),
+      cameraPositionValue: document.querySelector("#cameraPositionValue"),
+      cameraTargetValue: document.querySelector("#cameraTargetValue"),
+      viewCenterValue: document.querySelector("#viewCenterValue"),
+      viewVectorValue: document.querySelector("#viewVectorValue"),
+      viewLonInput: document.querySelector("#viewLonInput"),
+      viewLatInput: document.querySelector("#viewLatInput"),
+      viewDistanceInput: document.querySelector("#viewDistanceInput"),
+      viewFovInput: document.querySelector("#viewFovInput"),
+      viewStatus: document.querySelector("#viewStatus"),
+      copyViewButton: document.querySelector("#copyViewButton"),
+      copyUrlButton: document.querySelector("#copyUrlButton"),
+      copyPythonButton: document.querySelector("#copyPythonButton"),
+      applyJsonButton: document.querySelector("#applyJsonButton"),
+      exportMetadataButton: document.querySelector("#exportMetadataButton"),
+      viewJsonInput: document.querySelector("#viewJsonInput"),
+      openExportButton: document.querySelector("#openExportButton"),
+      exportDialog: document.querySelector("#exportDialog"),
+      exportFilenameInput: document.querySelector("#exportFilenameInput"),
+      exportFormatSelect: document.querySelector("#exportFormatSelect"),
+      exportDialogModeSelect: document.querySelector("#exportDialogModeSelect"),
+      exportDialogScaleSelect: document.querySelector("#exportDialogScaleSelect"),
+      exportDialogWidthInput: document.querySelector("#exportDialogWidthInput"),
+      exportDialogHeightInput: document.querySelector("#exportDialogHeightInput"),
+      exportDialogMetadataToggle: document.querySelector("#exportDialogMetadataToggle"),
+      exportDialogTransparentToggle: document.querySelector("#exportDialogTransparentToggle"),
+      exportSaveButton: document.querySelector("#exportSaveButton"),
+      exportCancelButton: document.querySelector("#exportCancelButton"),
+      exportStatus: document.querySelector("#exportStatus"),
       colorbarRamp: document.querySelector("#colorbarRamp"),
       colorMin: document.querySelector("#colorMin"),
       colorMax: document.querySelector("#colorMax"),
+      scaleBarLine: document.querySelector("#scaleBarLine"),
+      scaleBarValue: document.querySelector("#scaleBarValue"),
       cellValue: document.querySelector("#cellValue"),
       faceValue: document.querySelector("#faceValue"),
       localValue: document.querySelector("#localValue"),
@@ -51,13 +89,26 @@ export class App {
       max: 1,
       symlogConstant: 0.03,
       relief: true,
-      grid: false
+      grid: false,
+      axes: false,
+      northUp: false,
+      graticule: false,
+      scaleBar: false,
+      exportEmbedMetadata: true,
+      exportMode: "map",
+      exportScale: 1,
+      exportWidth: "",
+      exportHeight: "",
+      viewPanel: true
     };
     this.datasetCatalog = null;
     this.datasetId = "";
     this.lastUrlWrite = 0;
+    this.lastViewPanelUpdate = 0;
+    this.pendingCameraUrlValue = null;
     this.renderStats = null;
     this.selectedSample = null;
+    this.viewInputsDirty = false;
   }
 
   async start() {
@@ -204,9 +255,80 @@ npm run dev</pre>
       this.controls.gridToggle.setAttribute("aria-pressed", String(this.state.grid));
       this.writeUrlState();
     });
+    this.controls.axesToggle.addEventListener("click", () => {
+      this.state.axes = !this.state.axes;
+      this.globe?.setAxesVisible(this.state.axes);
+      this.controls.axesToggle.setAttribute("aria-pressed", String(this.state.axes));
+      this.writeUrlState();
+    });
+    this.controls.northUpToggle.addEventListener("change", () => {
+      this.state.northUp = this.controls.northUpToggle.checked;
+      this.globe?.setNorthUp(this.state.northUp);
+      this.syncViewOptionStyles();
+      this.writeUrlState();
+    });
+    this.controls.graticuleToggle.addEventListener("change", () => {
+      this.state.graticule = this.controls.graticuleToggle.checked;
+      this.globe?.setGraticuleVisible(this.state.graticule);
+      this.syncViewOptionStyles();
+      this.writeUrlState();
+    });
+    this.controls.scaleBarToggle.addEventListener("change", () => {
+      this.state.scaleBar = this.controls.scaleBarToggle.checked;
+      this.syncViewOptionStyles();
+      this.root.dataset.scaleBar = String(this.state.scaleBar);
+      this.updateScaleBar();
+      this.writeUrlState();
+    });
+    this.controls.viewPanelToggle.addEventListener("click", () => {
+      this.state.viewPanel = !this.state.viewPanel;
+      this.root.dataset.viewPanel = String(this.state.viewPanel);
+      this.controls.viewPanelToggle.setAttribute("aria-pressed", String(this.state.viewPanel));
+      this.writeUrlState();
+    });
     this.controls.resetViewButton.addEventListener("click", () => {
       this.net.resetView();
       this.globe.resetView();
+      this.viewInputsDirty = false;
+      this.updateViewPanel(true);
+      this.writeUrlState();
+    });
+    for (const control of this.viewInputControls()) {
+      control.addEventListener("input", () => {
+        this.viewInputsDirty = true;
+      });
+      control.addEventListener("change", () => {
+        if (this.viewInputsDirty) {
+          this.applyViewInputs();
+        }
+      });
+      control.addEventListener("keydown", (event) => {
+        if (event.key === "Enter") {
+          event.preventDefault();
+          this.applyViewInputs();
+        }
+      });
+    }
+    this.controls.applyJsonButton.addEventListener("click", () => this.applyViewJson());
+    this.controls.copyViewButton.addEventListener("click", () => this.copyViewJson());
+    this.controls.copyUrlButton.addEventListener("click", () => this.copyViewUrl());
+    this.controls.copyPythonButton.addEventListener("click", () => this.copyViewPython());
+    this.controls.exportMetadataButton.addEventListener("click", async () => {
+      this.setViewStatus("Saving view JSON...");
+      const result = await exportMetadata(this);
+      this.setViewStatus(exportResultMessage(result));
+    });
+    this.controls.openExportButton.addEventListener("click", () => this.openExportDialog("png"));
+    this.controls.exportCancelButton.addEventListener("click", () => this.closeExportDialog());
+    this.controls.exportSaveButton.addEventListener("click", () => this.exportCurrentImage());
+    this.controls.exportFormatSelect.addEventListener("change", () => this.updateExportFilenameExtension());
+    for (const control of [this.controls.exportDialogMetadataToggle, this.controls.exportDialogTransparentToggle]) {
+      control.addEventListener("change", () => this.syncExportDialogOptionStyles());
+    }
+    window.addEventListener("keydown", (event) => {
+      if (event.key === "Escape" && !this.controls.exportDialog.hidden) {
+        this.closeExportDialog();
+      }
     });
   }
 
@@ -227,6 +349,13 @@ npm run dev</pre>
       onHover: (sample) => this.updateInspector(sample),
       onSelect: (sample) => this.updateSelection(sample)
     });
+    if (this.pendingCameraUrlValue) {
+      this.globe.applyCameraUrlValue(this.pendingCameraUrlValue);
+      this.pendingCameraUrlValue = null;
+    }
+    this.globe.setAxesVisible(this.state.axes);
+    this.globe.setNorthUp(this.state.northUp);
+    this.globe.setGraticuleVisible(this.state.graticule);
   }
 
   setViewState(patch = {}) {
@@ -266,6 +395,24 @@ npm run dev</pre>
     if (patch.grid !== undefined) {
       this.state.grid = Boolean(patch.grid);
     }
+    if (patch.axes !== undefined) {
+      this.state.axes = Boolean(patch.axes);
+      this.globe?.setAxesVisible(this.state.axes);
+    }
+    if (patch.northUp !== undefined || patch.north !== undefined) {
+      this.state.northUp = Boolean(patch.northUp ?? patch.north);
+      this.globe?.setNorthUp(this.state.northUp);
+    }
+    if (patch.graticule !== undefined) {
+      this.state.graticule = Boolean(patch.graticule);
+      this.globe?.setGraticuleVisible(this.state.graticule);
+    }
+    if (patch.scaleBar !== undefined || patch.scalebar !== undefined) {
+      this.state.scaleBar = Boolean(patch.scaleBar ?? patch.scalebar);
+    }
+    if (patch.camera || patch.centerLonLat || patch.lonLat || patch.position) {
+      this.globe?.applyViewState(patch.camera ? patch : { camera: patch });
+    }
     const symlogConstant = Number(patch.symlogConstant);
     if (Number.isFinite(symlogConstant) && symlogConstant > 0) {
       this.state.symlogConstant = symlogConstant;
@@ -280,6 +427,7 @@ npm run dev</pre>
       datasetId: this.datasetId,
       manifestUrl: this.manifestUrl,
       state: { ...this.state },
+      viewState: this.currentViewState(),
       renderStats: this.renderStats ? { ...this.renderStats } : null,
       cacheStats: this.cache?.stats?.() ?? null,
       selection: this.selectionSnapshot(),
@@ -295,6 +443,8 @@ npm run dev</pre>
     renderer.draw();
     this.renderStats = renderer.stats?.() ?? null;
     this.updateLoadStatus();
+    this.updateViewPanel();
+    this.updateScaleBar();
     this.writeUrlState(true);
     requestAnimationFrame(() => this.loop());
   }
@@ -334,6 +484,37 @@ npm run dev</pre>
     } else if (grid === "1" || grid === "true") {
       this.state.grid = true;
     }
+    const axes = params.get("axes");
+    if (axes === "0" || axes === "false") {
+      this.state.axes = false;
+    } else if (axes === "1" || axes === "true") {
+      this.state.axes = true;
+    }
+    const north = params.get("north");
+    if (north === "0" || north === "false") {
+      this.state.northUp = false;
+    } else if (north === "1" || north === "true") {
+      this.state.northUp = true;
+    }
+    const graticule = params.get("graticule");
+    if (graticule === "0" || graticule === "false") {
+      this.state.graticule = false;
+    } else if (graticule === "1" || graticule === "true") {
+      this.state.graticule = true;
+    }
+    const scaleBar = params.get("scalebar");
+    if (scaleBar === "0" || scaleBar === "false") {
+      this.state.scaleBar = false;
+    } else if (scaleBar === "1" || scaleBar === "true") {
+      this.state.scaleBar = true;
+    }
+    const viewPanel = params.get("panel");
+    if (viewPanel === "0" || viewPanel === "false") {
+      this.state.viewPanel = false;
+    } else if (viewPanel === "1" || viewPanel === "true") {
+      this.state.viewPanel = true;
+    }
+    this.pendingCameraUrlValue = params.get("camera");
     const min = Number(params.get("min"));
     const max = Number(params.get("max"));
     if (Number.isFinite(min) && Number.isFinite(max) && max > min) {
@@ -359,8 +540,16 @@ npm run dev</pre>
     params.set("scale", this.state.scale);
     params.set("relief", this.state.relief ? "1" : "0");
     params.set("grid", this.state.grid ? "1" : "0");
+    params.set("axes", this.state.axes ? "1" : "0");
+    params.set("north", this.state.northUp ? "1" : "0");
+    params.set("graticule", this.state.graticule ? "1" : "0");
+    params.set("scalebar", this.state.scaleBar ? "1" : "0");
+    params.set("panel", this.state.viewPanel ? "1" : "0");
     params.set("min", formatNumber(this.state.min));
     params.set("max", formatNumber(this.state.max));
+    if (this.state.view === "globe" && this.globe) {
+      params.set("camera", this.globe.cameraUrlValue());
+    }
     const current = new URLSearchParams(window.location.search);
     if (current.has("remote")) {
       params.set("remote", current.get("remote") || "1");
@@ -378,7 +567,19 @@ npm run dev</pre>
     this.controls.maxInput.value = String(this.state.max);
     this.controls.reliefToggle.setAttribute("aria-pressed", String(this.state.relief));
     this.controls.gridToggle.setAttribute("aria-pressed", String(this.state.grid));
+    this.controls.axesToggle.setAttribute("aria-pressed", String(this.state.axes));
+    this.controls.northUpToggle.checked = this.state.northUp;
+    this.controls.graticuleToggle.checked = this.state.graticule;
+    this.controls.scaleBarToggle.checked = this.state.scaleBar;
+    this.syncViewOptionStyles();
+    this.controls.exportDialogMetadataToggle.checked = this.state.exportEmbedMetadata;
+    this.syncExportDialogOptionStyles();
+    this.controls.viewPanelToggle.setAttribute("aria-pressed", String(this.state.viewPanel));
+    this.root.dataset.viewPanel = String(this.state.viewPanel);
+    this.root.dataset.scaleBar = String(this.state.scaleBar);
     this.updateColorbar();
+    this.updateViewPanel(true);
+    this.updateScaleBar();
   }
 
   autoStretch(updateInputs = true) {
@@ -407,6 +608,301 @@ npm run dev</pre>
     const orders = renderStats?.orderCounts ? ` · ${formatOrderCounts(renderStats.orderCounts)}` : "";
     const loading = stats.pending > 0 ? ` · ${stats.pending} loading` : "";
     this.controls.loadStatus.textContent = `LOD ${this.state.order}/${this.state.maxOrder}${visible}${orders}${loading}`;
+  }
+
+  updateViewPanel(force = false) {
+    const now = performance.now();
+    if (!force && now - this.lastViewPanelUpdate < 250) {
+      return;
+    }
+    this.lastViewPanelUpdate = now;
+    const view = this.currentViewState();
+    const camera = view.camera;
+    if (!camera) {
+      this.controls.cameraPositionValue.textContent = "-";
+      this.controls.cameraTargetValue.textContent = "-";
+      this.controls.viewCenterValue.textContent = "-";
+      this.controls.viewVectorValue.textContent = "-";
+      return;
+    }
+    this.controls.cameraPositionValue.textContent = formatVector(camera.position, 3);
+    this.controls.cameraTargetValue.textContent = formatVector(camera.target, 3);
+    this.controls.viewCenterValue.textContent = `${camera.centerLonLat.lon.toFixed(4)}, ${camera.centerLonLat.lat.toFixed(4)}`;
+    this.controls.viewVectorValue.textContent = formatVector(camera.centerVector, 4);
+    const editingViewInputs = this.viewInputControls().includes(document.activeElement);
+    if ((!editingViewInputs || force) && !this.viewInputsDirty) {
+      this.controls.viewLonInput.value = camera.centerLonLat.lon.toFixed(6);
+      this.controls.viewLatInput.value = camera.centerLonLat.lat.toFixed(6);
+      this.controls.viewDistanceInput.value = camera.distance.toFixed(4);
+      this.controls.viewFovInput.value = camera.fov.toFixed(2);
+    }
+    if (document.activeElement !== this.controls.viewJsonInput && (force || !this.controls.viewJsonInput.value.trim())) {
+      this.controls.viewJsonInput.value = JSON.stringify(view, null, 2);
+    }
+  }
+
+  currentViewState() {
+    const rendererState = this.state.view === "globe"
+      ? this.globe?.viewState()
+      : {
+          net: {
+            scale: this.net?.transform.scale ?? null,
+            offsetX: this.net?.transform.offsetX ?? null,
+            offsetY: this.net?.transform.offsetY ?? null
+          }
+        };
+    return {
+      datasetId: this.datasetId,
+      layerId: this.state.layerId,
+      view: this.state.view,
+      order: this.state.maxOrder,
+      colormap: this.state.colormap,
+      scale: this.state.scale,
+      min: this.state.min,
+      max: this.state.max,
+      relief: this.state.relief,
+      grid: this.state.grid,
+      axes: this.state.axes,
+      northUp: this.state.northUp,
+      graticule: this.state.graticule,
+      scaleBar: this.state.scaleBar,
+      ...rendererState
+    };
+  }
+
+  applyViewInputs() {
+    const lon = Number(this.controls.viewLonInput.value);
+    const lat = Number(this.controls.viewLatInput.value);
+    const distance = Number(this.controls.viewDistanceInput.value);
+    const fov = Number(this.controls.viewFovInput.value);
+    if (this.state.view !== "globe" || !Number.isFinite(lon) || !Number.isFinite(lat)) {
+      this.setViewStatus("Invalid camera inputs.");
+      return;
+    }
+    this.globe.focusLonLat(lon, lat, Number.isFinite(distance) ? distance : null);
+    const appliedFov = normalizeCameraFov(fov);
+    if (Number.isFinite(appliedFov)) {
+      this.globe.applyViewState({ fov: appliedFov });
+    }
+    this.viewInputsDirty = false;
+    this.updateViewPanel(true);
+    this.writeUrlState();
+    this.setViewStatus(fov !== appliedFov && Number.isFinite(appliedFov)
+      ? `Applied camera view. FOV limited to ${MAX_CAMERA_FOV}.`
+      : "Applied camera view.");
+  }
+
+  applyViewJson() {
+    let parsed;
+    try {
+      parsed = JSON.parse(this.controls.viewJsonInput.value);
+    } catch {
+      this.setViewStatus("Invalid view JSON.");
+      return;
+    }
+    this.viewInputsDirty = false;
+    this.setViewState(parsed);
+    this.updateViewPanel(true);
+    this.writeUrlState();
+    this.setViewStatus("Applied view JSON.");
+  }
+
+  viewInputControls() {
+    return [
+      this.controls.viewLonInput,
+      this.controls.viewLatInput,
+      this.controls.viewDistanceInput,
+      this.controls.viewFovInput
+    ];
+  }
+
+  async copyViewJson() {
+    const text = JSON.stringify(this.currentViewState(), null, 2);
+    this.controls.viewJsonInput.value = text;
+    await this.copyTextWithStatus(text, "Copied view JSON.");
+  }
+
+  async copyViewUrl() {
+    this.writeUrlState(false);
+    await this.copyTextWithStatus(window.location.href, "Copied view URL.");
+  }
+
+  async copyViewPython() {
+    await this.copyTextWithStatus(this.currentViewPython(), "Copied Python snippet.");
+  }
+
+  async copyTextWithStatus(text, message) {
+    try {
+      await copyText(text);
+      this.setViewStatus(message);
+    } catch (error) {
+      this.setViewStatus(`Copy failed: ${errorMessage(error)}`);
+    }
+  }
+
+  currentViewPython() {
+    const args = [
+      pythonLiteral(this.datasetId),
+      `layer=${pythonLiteral(this.state.layerId)}`,
+      `view=${pythonLiteral(this.state.view)}`,
+      `order=${this.state.maxOrder}`,
+      `cmap=${pythonLiteral(this.state.colormap)}`,
+      `scale=${pythonLiteral(this.state.scale)}`,
+      `min=${formatPythonNumber(this.state.min)}`,
+      `max=${formatPythonNumber(this.state.max)}`,
+      `relief=${pythonLiteral(this.state.relief)}`,
+      `grid=${pythonLiteral(this.state.grid)}`
+    ];
+    const extra = [
+      `axes=${pythonLiteral(this.state.axes)}`,
+      `north=${pythonLiteral(this.state.northUp)}`,
+      `graticule=${pythonLiteral(this.state.graticule)}`,
+      `scalebar=${pythonLiteral(this.state.scaleBar)}`,
+      `panel=${pythonLiteral(this.state.viewPanel)}`
+    ];
+    if (this.state.view === "globe" && this.globe) {
+      extra.push(`camera=${pythonLiteral(this.globe.cameraUrlValue())}`);
+    }
+    return [
+      "from hpxviewer import Viewer",
+      "",
+      "v = Viewer(",
+      ...args.map((line) => `    ${line},`),
+      ").set(",
+      ...extra.map((line) => `    ${line},`),
+      ")",
+      "v.show()",
+      ""
+    ].join("\n");
+  }
+
+  openExportDialog(format = "png") {
+    const extension = format === "jpeg" ? "jpg" : format;
+    this.controls.exportFormatSelect.value = extension === "jpg" ? "jpg" : "png";
+    this.controls.exportDialogModeSelect.value = this.state.exportMode;
+    this.controls.exportDialogScaleSelect.value = String(this.state.exportScale);
+    this.controls.exportDialogWidthInput.value = this.state.exportWidth;
+    this.controls.exportDialogHeightInput.value = this.state.exportHeight;
+    this.controls.exportDialogTransparentToggle.checked = false;
+    this.controls.exportDialogMetadataToggle.checked = this.state.exportEmbedMetadata;
+    this.controls.exportFilenameInput.value = defaultExportFileName(this, extension);
+    this.updateExportFilenameExtension();
+    this.setExportStatus("");
+    this.controls.exportDialog.hidden = false;
+    this.controls.exportFilenameInput.focus();
+    this.controls.exportFilenameInput.select();
+  }
+
+  closeExportDialog() {
+    this.controls.exportDialog.hidden = true;
+  }
+
+  updateExportFilenameExtension() {
+    const format = this.controls.exportFormatSelect.value === "jpg" ? "jpg" : "png";
+    const input = this.controls.exportFilenameInput;
+    const base = input.value.trim() || defaultExportFileName(this, format);
+    input.value = base.replace(/\.(png|jpe?g)$/i, `.${format}`);
+    const transparentDisabled = format !== "png";
+    this.controls.exportDialogTransparentToggle.disabled = transparentDisabled;
+    if (transparentDisabled) {
+      this.controls.exportDialogTransparentToggle.checked = false;
+    }
+    this.syncExportDialogOptionStyles();
+  }
+
+  setExportStatus(message) {
+    this.controls.exportStatus.textContent = message;
+  }
+
+  setViewStatus(message) {
+    this.controls.viewStatus.textContent = message;
+  }
+
+  syncViewOptionStyles() {
+    for (const control of [this.controls.northUpToggle, this.controls.graticuleToggle, this.controls.scaleBarToggle]) {
+      syncCheckField(control);
+    }
+  }
+
+  syncExportDialogOptionStyles() {
+    for (const control of [this.controls.exportDialogMetadataToggle, this.controls.exportDialogTransparentToggle]) {
+      syncCheckField(control);
+    }
+  }
+
+  async exportCurrentImage() {
+    const renderer = this.state.view === "globe" ? this.globe : this.net;
+    const format = this.controls.exportFormatSelect.value;
+    const width = Number(this.controls.exportDialogWidthInput.value);
+    const height = Number(this.controls.exportDialogHeightInput.value);
+    const transparent = this.controls.exportDialogTransparentToggle.checked;
+    const embedMetadata = this.controls.exportDialogMetadataToggle.checked;
+    renderer.draw();
+    this.controls.exportSaveButton.disabled = true;
+    this.setExportStatus("Preparing image...");
+    try {
+      const result = await exportImage(this, {
+        mode: this.controls.exportDialogModeSelect.value,
+        format,
+        scale: Number(this.controls.exportDialogScaleSelect.value),
+        width: Number.isFinite(width) && width > 0 ? width : null,
+        height: Number.isFinite(height) && height > 0 ? height : null,
+        transparent,
+        embedMetadata,
+        filename: this.controls.exportFilenameInput.value
+      });
+      this.state.exportMode = this.controls.exportDialogModeSelect.value;
+      this.state.exportScale = Number(this.controls.exportDialogScaleSelect.value);
+      this.state.exportWidth = this.controls.exportDialogWidthInput.value;
+      this.state.exportHeight = this.controls.exportDialogHeightInput.value;
+      this.state.exportEmbedMetadata = embedMetadata;
+      this.setExportStatus(exportResultMessage(result));
+      if (result.method !== "canceled") {
+        setTimeout(() => this.closeExportDialog(), 650);
+      }
+    } catch (error) {
+      this.setExportStatus(error instanceof Error ? error.message : String(error));
+    } finally {
+      this.controls.exportSaveButton.disabled = false;
+    }
+  }
+
+  async exportImageDataUrl(options = {}) {
+    const renderer = this.state.view === "globe" ? this.globe : this.net;
+    renderer.draw();
+    const { blob, extension, width, height } = await renderExportBlob(this, {
+      mode: options.mode ?? this.state.exportMode,
+      format: options.format ?? "png",
+      scale: options.scale ?? this.state.exportScale,
+      width: options.width ?? null,
+      height: options.height ?? null,
+      transparent: Boolean(options.transparent),
+      embedMetadata: options.embedMetadata !== false
+    });
+    return {
+      dataUrl: await blobToDataUrl(blob),
+      extension,
+      width,
+      height,
+      bytes: blob.size,
+      type: blob.type
+    };
+  }
+
+  updateScaleBar() {
+    if (!this.state.scaleBar || this.state.view !== "globe" || !this.globe) {
+      return;
+    }
+    const scale = this.globe.surfaceScalePerPixel(120);
+    if (!Number.isFinite(scale.valuePerPixel) || scale.valuePerPixel <= 0) {
+      this.controls.scaleBarValue.textContent = "-";
+      return;
+    }
+    const maxPixels = 150;
+    const distance = niceDistance(scale.valuePerPixel * maxPixels);
+    const width = Math.max(36, Math.min(maxPixels, distance / scale.valuePerPixel));
+    this.controls.scaleBarLine.style.width = `${width.toFixed(1)}px`;
+    this.controls.scaleBarValue.textContent = formatScaleDistance(distance, scale.unit);
   }
 
   updateActiveOrder(renderer) {
@@ -524,6 +1020,167 @@ function formatNumber(value) {
     return value.toExponential(3);
   }
   return value.toFixed(4).replace(/0+$/, "").replace(/\.$/, "");
+}
+
+function formatVector(vector, precision = 3) {
+  if (!vector) {
+    return "-";
+  }
+  const values = [vector.x, vector.y, vector.z].map(Number);
+  if (values.some((value) => !Number.isFinite(value))) {
+    return "-";
+  }
+  return values.map((value) => value.toFixed(precision)).join(", ");
+}
+
+function formatPythonNumber(value) {
+  if (!Number.isFinite(value)) {
+    return "None";
+  }
+  return Number(value).toPrecision(12).replace(/\.?0+($|e)/, "$1");
+}
+
+function normalizeCameraFov(value) {
+  const fov = Number(value);
+  if (!Number.isFinite(fov) || fov < MIN_CAMERA_FOV) {
+    return Number.NaN;
+  }
+  return Math.min(MAX_CAMERA_FOV, fov);
+}
+
+function pythonLiteral(value) {
+  if (typeof value === "boolean") {
+    return value ? "True" : "False";
+  }
+  if (typeof value === "number") {
+    return formatPythonNumber(value);
+  }
+  return JSON.stringify(String(value));
+}
+
+function niceDistance(maxDistance) {
+  if (!Number.isFinite(maxDistance) || maxDistance <= 0) {
+    return 1;
+  }
+  const exponent = Math.floor(Math.log10(maxDistance));
+  const base = 10 ** exponent;
+  for (const multiplier of [5, 2, 1]) {
+    const candidate = multiplier * base;
+    if (candidate <= maxDistance) {
+      return candidate;
+    }
+  }
+  return base * 0.5;
+}
+
+function formatDistance(km) {
+  if (!Number.isFinite(km)) {
+    return "-";
+  }
+  if (km >= 1000) {
+    return `${Math.round(km).toLocaleString("en-US")} km`;
+  }
+  if (km >= 1) {
+    return `${Math.round(km)} km`;
+  }
+  return `${Math.round(km * 1000)} m`;
+}
+
+function formatScaleDistance(value, unit) {
+  if (unit === "km") {
+    return formatDistance(value);
+  }
+  if (unit === "deg") {
+    return formatAngularDistance(value);
+  }
+  return `${formatShortNumber(value)} ${unit || ""}`.trim();
+}
+
+function formatAngularDistance(degrees) {
+  if (!Number.isFinite(degrees)) {
+    return "-";
+  }
+  if (degrees >= 1) {
+    return `${formatShortNumber(degrees)} deg`;
+  }
+  const arcmin = degrees * 60;
+  if (arcmin >= 1) {
+    return `${formatShortNumber(arcmin)} arcmin`;
+  }
+  return `${formatShortNumber(degrees * 3600)} arcsec`;
+}
+
+function formatShortNumber(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) {
+    return "-";
+  }
+  if (Math.abs(number) >= 100) {
+    return String(Math.round(number));
+  }
+  if (Math.abs(number) >= 10) {
+    return number.toFixed(1).replace(/\.0$/, "");
+  }
+  if (Math.abs(number) >= 1) {
+    return number.toFixed(2).replace(/0+$/, "").replace(/\.$/, "");
+  }
+  return number.toPrecision(2);
+}
+
+function exportResultMessage(result) {
+  if (!result || result.method === "canceled") {
+    return "Export canceled.";
+  }
+  const size = result.bytes >= 1024 * 1024
+    ? `${(result.bytes / (1024 * 1024)).toFixed(1)} MiB`
+    : `${Math.max(1, Math.round(result.bytes / 1024))} KiB`;
+  if (result.method === "file-picker") {
+    return `Saved ${result.filename} (${size}).`;
+  }
+  return `Download started: ${result.filename} (${size}).`;
+}
+
+function errorMessage(error) {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function syncCheckField(control) {
+  const field = control.closest(".check-field");
+  field?.classList.toggle("is-checked", control.checked);
+  field?.classList.toggle("is-disabled", control.disabled);
+}
+
+function blobToDataUrl(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.addEventListener("load", () => resolve(String(reader.result)));
+    reader.addEventListener("error", () => reject(reader.error ?? new Error("Failed to read export blob.")));
+    reader.readAsDataURL(blob);
+  });
+}
+
+async function copyText(text) {
+  if (navigator.clipboard?.writeText && window.isSecureContext) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return;
+    } catch {
+      // Fall back to execCommand below for browsers that expose the API but deny permission.
+    }
+  }
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.setAttribute("readonly", "");
+  textarea.style.position = "fixed";
+  textarea.style.left = "-9999px";
+  textarea.style.top = "0";
+  document.body.append(textarea);
+  textarea.select();
+  const copied = document.execCommand("copy");
+  textarea.remove();
+  if (!copied) {
+    throw new Error("Clipboard is unavailable.");
+  }
 }
 
 function formatOrderCounts(counts) {

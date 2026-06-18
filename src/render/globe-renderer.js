@@ -41,7 +41,16 @@ const NEAR_ZOOM_SPEED = 0.42;
 const FAR_ZOOM_SPEED = 0.78;
 const NEAR_DAMPING = 0.32;
 const FAR_DAMPING = 0.08;
+const MIN_CAMERA_FOV = 1;
+const MAX_CAMERA_FOV = 179.9;
+const DEFAULT_CAMERA_FOV = 38;
 const RELIEF_LAYER_PATTERN = /(elevation|height|terrain|topo|dem)/i;
+const AXIS_LENGTH = GLOBE_RADIUS * 1.56;
+const AXIS_INNER_RADIUS = GLOBE_RADIUS * 1.08;
+const DEFAULT_CAMERA_UP = new THREE.Vector3(0, 0, 1);
+const GEOGRAPHIC_NORTH_DISPLAY = new THREE.Vector3(0, 0, 1);
+const GRATICULE_RADIUS = GLOBE_RADIUS + 0.003;
+const ANGULAR_RADIUS_DEG = 180 / Math.PI;
 
 const GLOBE_VERTEX_SHADER = `
 out vec2 vUv;
@@ -229,6 +238,7 @@ export class GlobeRenderer {
   constructor({ canvas, manifest, scheduler, state, onHover, onSelect = () => {} }) {
     this.canvas = canvas;
     this.manifest = manifest;
+    this.surfaceScale = surfaceScaleForManifest(manifest);
     this.scheduler = scheduler;
     this.state = state;
     this.onHover = onHover;
@@ -246,7 +256,12 @@ export class GlobeRenderer {
     this.selectionMeshes = new Map();
     this.hovered = null;
 
-    this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false });
+    this.renderer = new THREE.WebGLRenderer({
+      canvas,
+      antialias: true,
+      alpha: true,
+      preserveDrawingBuffer: true
+    });
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
     this.renderer.setClearColor(0x202326, 1);
     this.textureSupport = scalarTextureSupport(this.renderer.getContext());
@@ -264,7 +279,7 @@ export class GlobeRenderer {
       transparent: true
     });
 
-    this.camera = new THREE.PerspectiveCamera(38, 1, 0.01, 100);
+    this.camera = new THREE.PerspectiveCamera(DEFAULT_CAMERA_FOV, 1, 0.01, 100);
     this.camera.up.set(0, 0, 1);
     this.camera.position.set(3.2, 2.15, 1.7);
     this.camera.lookAt(0, 0, 0);
@@ -280,6 +295,12 @@ export class GlobeRenderer {
 
     const ambient = new THREE.AmbientLight(0xffffff, 1.25);
     this.scene.add(ambient);
+    this.axesGroup = createAxesGroup();
+    this.axesGroup.visible = Boolean(this.state.axes);
+    this.scene.add(this.axesGroup);
+    this.graticuleGroup = createGraticuleGroup();
+    this.graticuleGroup.visible = Boolean(this.state.graticule);
+    this.scene.add(this.graticuleGroup);
     this.blankTextures = createBlankTextures();
 
     canvas.addEventListener("pointerdown", (event) => {
@@ -345,9 +366,33 @@ export class GlobeRenderer {
 
   resetView() {
     this.camera.position.set(3.2, 2.15, 1.7);
+    this.camera.fov = DEFAULT_CAMERA_FOV;
+    this.camera.up.copy(DEFAULT_CAMERA_UP);
+    this.camera.updateProjectionMatrix();
     this.controls.target.set(0, 0, 0);
     this.constrainCameraOutsideGlobe();
     this.updateInteractionScale();
+    if (this.state.northUp) {
+      this.alignNorthUp();
+    }
+    this.controls.update();
+  }
+
+  setAxesVisible(visible) {
+    this.axesGroup.visible = Boolean(visible);
+  }
+
+  setGraticuleVisible(visible) {
+    this.graticuleGroup.visible = Boolean(visible);
+  }
+
+  setNorthUp(visible) {
+    if (visible) {
+      this.alignNorthUp();
+    } else {
+      this.camera.up.copy(DEFAULT_CAMERA_UP);
+      this.camera.lookAt(this.controls.target);
+    }
     this.controls.update();
   }
 
@@ -362,7 +407,81 @@ export class GlobeRenderer {
     this.camera.lookAt(0, 0, 0);
     this.constrainCameraOutsideGlobe();
     this.updateInteractionScale();
+    if (this.state.northUp) {
+      this.alignNorthUp();
+    }
     this.controls.update();
+  }
+
+  applyViewState(view = {}) {
+    const camera = view.camera ?? view;
+    const position = vector3FromObject(camera.position);
+    const target = vector3FromObject(camera.target);
+    if (position) {
+      this.camera.position.copy(position);
+    }
+    if (target) {
+      this.controls.target.copy(target);
+    }
+    const center = camera.centerLonLat ?? camera.lonLat ?? view.centerLonLat ?? view.lonLat;
+    if (!position && !target && center && Number.isFinite(Number(center.lon)) && Number.isFinite(Number(center.lat))) {
+      this.focusLonLat(center.lon, center.lat, camera.distance ?? view.distance);
+    }
+    const fov = normalizeCameraFov(camera.fov ?? view.fov);
+    if (Number.isFinite(fov)) {
+      this.camera.fov = fov;
+      this.camera.updateProjectionMatrix();
+    }
+    this.constrainCameraOutsideGlobe();
+    this.camera.lookAt(this.controls.target);
+    this.updateInteractionScale();
+    if (this.state.northUp) {
+      this.alignNorthUp();
+    }
+    this.controls.update();
+  }
+
+  viewState() {
+    const centerDisplay = this.surfaceFocusDirection();
+    const centerProjection = displayVectorToProjection(centerDisplay);
+    const centerLonLat = vectorToLonLat(centerProjection);
+    return {
+      camera: {
+        position: vectorObject(this.camera.position),
+        target: vectorObject(this.controls.target),
+        distance: this.camera.position.distanceTo(this.controls.target),
+        fov: this.camera.fov,
+        centerLonLat,
+        centerVector: vectorObject(centerDisplay)
+      },
+      coordinateSystem: {
+        camera: "display-xyz-z-up",
+        centerVector: "display-xyz-z-up",
+        projectionVector: "internal-projection-xyz-y-up",
+        note: "The UI uses Z-up display XYZ, so +Z is the north pole. Internal projection vectors use Y-up."
+      }
+    };
+  }
+
+  cameraUrlValue() {
+    const p = this.camera.position;
+    const t = this.controls.target;
+    return [p.x, p.y, p.z, t.x, t.y, t.z, this.camera.fov].map((value) => compactFloat(value)).join(",");
+  }
+
+  applyCameraUrlValue(value) {
+    if (!value) {
+      return;
+    }
+    const parts = String(value).split(",").map(Number);
+    if (parts.length !== 7 || parts.some((item) => !Number.isFinite(item))) {
+      return;
+    }
+    this.applyViewState({
+      position: { x: parts[0], y: parts[1], z: parts[2] },
+      target: { x: parts[3], y: parts[4], z: parts[5] },
+      fov: parts[6]
+    });
   }
 
   desiredTiles() {
@@ -467,8 +586,13 @@ export class GlobeRenderer {
   draw() {
     this.resize();
     this.syncMeshes();
+    this.setAxesVisible(this.state.axes);
+    this.setGraticuleVisible(this.state.graticule);
     this.controls.update();
     this.constrainCameraOutsideGlobe();
+    if (this.state.northUp) {
+      this.alignNorthUp();
+    }
     this.updateInteractionScale();
     this.renderer.render(this.scene, this.camera);
   }
@@ -597,6 +721,55 @@ export class GlobeRenderer {
     this.controls.dampingFactor = THREE.MathUtils.lerp(NEAR_DAMPING, FAR_DAMPING, zoomT);
   }
 
+  alignNorthUp() {
+    const viewNormal = this.camera.position.clone().sub(this.controls.target);
+    if (viewNormal.lengthSq() < 1e-10) {
+      return;
+    }
+    viewNormal.normalize();
+    const projectedNorth = GEOGRAPHIC_NORTH_DISPLAY.clone()
+      .sub(viewNormal.clone().multiplyScalar(GEOGRAPHIC_NORTH_DISPLAY.dot(viewNormal)));
+    if (projectedNorth.lengthSq() < 1e-8) {
+      this.camera.up.copy(DEFAULT_CAMERA_UP);
+    } else {
+      this.camera.up.copy(projectedNorth.normalize());
+    }
+    this.camera.lookAt(this.controls.target);
+  }
+
+  surfaceScalePerPixel(samplePixels = 120) {
+    const distance = this.surfaceDistanceForScreenPixels(samplePixels, this.surfaceScale.radius);
+    return {
+      ...this.surfaceScale,
+      valuePerPixel: Number.isFinite(distance) && distance > 0 ? distance / samplePixels : Number.NaN
+    };
+  }
+
+  surfaceDistanceForScreenPixels(samplePixels = 120, radius = 1) {
+    const rect = this.canvas.getBoundingClientRect();
+    const span = Math.max(2, Math.min(rect.width * 0.75, Number(samplePixels) || 120));
+    const y = rect.top + rect.height * 0.5;
+    const x0 = rect.left + rect.width * 0.5 - span * 0.5;
+    const x1 = rect.left + rect.width * 0.5 + span * 0.5;
+    const a = this.surfaceVectorAtScreenPoint(x0, y);
+    const b = this.surfaceVectorAtScreenPoint(x1, y);
+    if (!a || !b) {
+      return Number.NaN;
+    }
+    const dot = THREE.MathUtils.clamp(a[0] * b[0] + a[1] * b[1] + a[2] * b[2], -1, 1);
+    return Math.acos(dot) * radius;
+  }
+
+  surfaceVectorAtScreenPoint(clientX, clientY) {
+    const rect = this.canvas.getBoundingClientRect();
+    this.pointer.x = ((clientX - rect.left) / rect.width) * 2 - 1;
+    this.pointer.y = -((clientY - rect.top) / rect.height) * 2 + 1;
+    this.camera.updateMatrixWorld(true);
+    this.raycaster.setFromCamera(this.pointer, this.camera);
+    const hit = raySphereIntersection(this.raycaster.ray.origin, this.raycaster.ray.direction, GLOBE_RADIUS);
+    return hit ? displayVectorToProjection(hit.normalize()) : null;
+  }
+
   horizonCullMinDot(distance) {
     const safeDistance = Math.max(GLOBE_MIN_CAMERA_RADIUS, distance);
     const horizonDot = GLOBE_RADIUS / safeDistance;
@@ -620,6 +793,7 @@ export class GlobeRenderer {
   }
 
   surfaceFocusDirection() {
+    this.camera.updateMatrixWorld(true);
     const origin = this.camera.position.clone();
     const direction = new THREE.Vector3();
     this.camera.getWorldDirection(direction);
@@ -1053,6 +1227,159 @@ function displayArray(normal) {
 
 function displayVector(normal) {
   return new THREE.Vector3(normal[0], normal[2], normal[1]).normalize();
+}
+
+function displayVectorToProjection(vector) {
+  return [vector.x, vector.z, vector.y];
+}
+
+function vectorObject(vector) {
+  return {
+    x: Number(vector.x),
+    y: Number(vector.y),
+    z: Number(vector.z)
+  };
+}
+
+function vector3FromObject(value) {
+  if (!value) {
+    return null;
+  }
+  const x = Number(value.x);
+  const y = Number(value.y);
+  const z = Number(value.z);
+  if (![x, y, z].every(Number.isFinite)) {
+    return null;
+  }
+  return new THREE.Vector3(x, y, z);
+}
+
+function surfaceScaleForManifest(manifest) {
+  const body = manifest?.body;
+  const radiusKm = Number(body?.radiusKm);
+  if (Number.isFinite(radiusKm) && radiusKm > 0) {
+    return {
+      radius: radiusKm,
+      unit: "km",
+      physical: true,
+      bodyName: typeof body?.name === "string" ? body.name : ""
+    };
+  }
+  return {
+    radius: ANGULAR_RADIUS_DEG,
+    unit: "deg",
+    physical: false,
+    bodyName: typeof body?.name === "string" ? body.name : ""
+  };
+}
+
+function normalizeCameraFov(value) {
+  const fov = Number(value);
+  if (!Number.isFinite(fov) || fov < MIN_CAMERA_FOV) {
+    return Number.NaN;
+  }
+  return Math.min(MAX_CAMERA_FOV, fov);
+}
+
+function compactFloat(value) {
+  return Number(value).toFixed(6).replace(/0+$/, "").replace(/\.$/, "");
+}
+
+function createAxesGroup() {
+  const group = new THREE.Group();
+  const axes = [
+    { name: "X", color: 0xff6b6b, direction: new THREE.Vector3(1, 0, 0) },
+    { name: "Y", color: 0x5fd36a, direction: new THREE.Vector3(0, 1, 0) },
+    { name: "Z", color: 0x6ba7ff, direction: new THREE.Vector3(0, 0, 1) }
+  ];
+  for (const axis of axes) {
+    group.add(createAxisSegment(axis.direction, axis.color));
+    group.add(createAxisSegment(axis.direction.clone().multiplyScalar(-1), axis.color));
+    group.add(createAxisLabel(`+${axis.name}`, axis.direction, axis.color));
+    group.add(createAxisLabel(`-${axis.name}`, axis.direction.clone().multiplyScalar(-1), axis.color));
+  }
+  return group;
+}
+
+function createAxisSegment(direction, color) {
+  const start = direction.clone().normalize().multiplyScalar(AXIS_INNER_RADIUS);
+  const end = direction.clone().normalize().multiplyScalar(AXIS_LENGTH);
+  const geometry = new THREE.BufferGeometry().setFromPoints([start, end]);
+  const material = new THREE.LineBasicMaterial({
+    color,
+    transparent: true,
+    opacity: 0.68,
+    depthTest: false
+  });
+  const line = new THREE.Line(geometry, material);
+  line.renderOrder = 40;
+  return line;
+}
+
+function createAxisLabel(text, direction, color) {
+  const canvas = document.createElement("canvas");
+  canvas.width = 96;
+  canvas.height = 48;
+  const context = canvas.getContext("2d");
+  context.clearRect(0, 0, canvas.width, canvas.height);
+  context.font = "700 26px Inter, system-ui, sans-serif";
+  context.textAlign = "center";
+  context.textBaseline = "middle";
+  context.lineWidth = 5;
+  context.strokeStyle = "rgba(20, 22, 24, 0.92)";
+  context.fillStyle = `#${color.toString(16).padStart(6, "0")}`;
+  context.strokeText(text, canvas.width * 0.5, canvas.height * 0.5);
+  context.fillText(text, canvas.width * 0.5, canvas.height * 0.5);
+  const texture = new THREE.CanvasTexture(canvas);
+  const material = new THREE.SpriteMaterial({
+    map: texture,
+    transparent: true,
+    depthTest: false
+  });
+  const sprite = new THREE.Sprite(material);
+  sprite.position.copy(direction.clone().normalize().multiplyScalar(AXIS_LENGTH * 1.08));
+  sprite.scale.set(0.14, 0.07, 1);
+  sprite.renderOrder = 41;
+  return sprite;
+}
+
+function createGraticuleGroup() {
+  const group = new THREE.Group();
+  const material = new THREE.LineBasicMaterial({
+    color: 0xf6f1e7,
+    transparent: true,
+    opacity: 0.22,
+    depthTest: true,
+    depthWrite: false
+  });
+  for (let lon = -180; lon < 180; lon += 30) {
+    group.add(createLonLatLine(material, lineRange(-80, 80, 2).map((lat) => [lon, lat])));
+  }
+  for (let lat = -60; lat <= 60; lat += 30) {
+    group.add(createLonLatLine(material, lineRange(-180, 180, 2).map((lon) => [lon, lat])));
+  }
+  return group;
+}
+
+function createLonLatLine(material, lonLatPairs) {
+  const points = lonLatPairs.map(([lon, lat]) => displayLonLatPoint(lon, lat, GRATICULE_RADIUS));
+  const geometry = new THREE.BufferGeometry().setFromPoints(points);
+  const line = new THREE.Line(geometry, material);
+  line.renderOrder = 34;
+  return line;
+}
+
+function displayLonLatPoint(lon, lat, radius) {
+  const point = displayArray(lonLatToVector(lon, lat, radius));
+  return new THREE.Vector3(point[0], point[1], point[2]);
+}
+
+function lineRange(start, stop, step) {
+  const values = [];
+  for (let value = start; value <= stop; value += step) {
+    values.push(value);
+  }
+  return values;
 }
 
 function displayPoint(face, u, v) {

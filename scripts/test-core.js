@@ -59,8 +59,19 @@ validateManifest({
   nside: 256,
   tileShift: 8,
   tileSize: 256,
+  body: { name: "Earth", radiusKm: 6371.0088 },
   layers: [quantizedLayer]
 });
+assert.throws(() => validateManifest({
+  schema: "hpxmap-v1",
+  ordering: "nested",
+  maxOrder: 8,
+  nside: 256,
+  tileShift: 8,
+  tileSize: 256,
+  body: { radiusKm: 0 },
+  layers: [quantizedLayer]
+}), /body\.radiusKm/);
 
 for (let face = 0; face < 12; face += 1) {
   const bounds = tileBounds({ order: 10, face, x: 0, y: 0 }, 8);

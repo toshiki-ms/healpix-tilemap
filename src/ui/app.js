@@ -108,6 +108,12 @@ export class App {
     this.renderStats = null;
     this.selectedSample = null;
     this.viewInputsDirty = false;
+    this.debugMode = new URLSearchParams(window.location.search).has("debug");
+    this.lastDebugPanelUpdate = 0;
+    this.debugPanel = this.debugMode ? createDebugPanel() : null;
+    if (this.debugPanel) {
+      this.root.appendChild(this.debugPanel.element);
+    }
   }
 
   async start() {
@@ -117,8 +123,9 @@ export class App {
       this.showDatasetSetupMessage(error);
       return;
     }
-    if (new URLSearchParams(window.location.search).has("debug")) {
+    if (this.debugMode) {
       window.__hpxApp = this;
+      window.__hpxTileDiagnostics = () => this.tileDiagnostics();
     }
     warmWasmDecoder();
     this.applySplitUrlState();
@@ -1007,7 +1014,7 @@ npm run dev</pre>
     for (const pane of panes) {
       this.syncActivePaneAliases(pane);
       const renderer = pane.state.view === "globe" ? pane.globe : pane.net;
-      this.updateActiveOrder(renderer);
+      this.updateActiveOrder(pane, renderer);
       const visible = renderer.desiredTiles();
       if (!schedulerRequests.has(pane.scheduler)) {
         schedulerRequests.set(pane.scheduler, []);
@@ -1254,6 +1261,7 @@ npm run dev</pre>
     const orders = renderStats?.orderCounts ? ` · ${formatOrderCounts(renderStats.orderCounts)}` : "";
     const loading = stats.pending > 0 ? ` · ${stats.pending} loading` : "";
     this.controls.loadStatus.textContent = `LOD ${this.state.order}/${this.state.maxOrder}${visible}${orders}${loading}`;
+    this.updateDebugDiagnostics();
   }
 
   updateViewPanel(force = false) {
@@ -1677,12 +1685,55 @@ npm run dev</pre>
     }
   }
 
-  updateActiveOrder(renderer) {
-    const minOrder = this.manifest.minOrder ?? this.manifest.tileShift;
-    const nextOrder = renderer.detailOrder
-      ? renderer.detailOrder(this.state.maxOrder)
-      : this.state.maxOrder;
-    this.state.order = clampOrder(nextOrder, minOrder, this.state.maxOrder);
+  updateActiveOrder(pane, renderer) {
+    const minOrder = pane.manifest.minOrder ?? pane.manifest.tileShift;
+    const requestedMaxOrder = pane.state.maxOrder;
+    const lodDecision = renderer.lodDiagnostics
+      ? renderer.lodDiagnostics(requestedMaxOrder)
+      : { selectedOrder: requestedMaxOrder };
+    const nextOrder = Number(lodDecision.selectedOrder);
+    pane.state.order = clampOrder(nextOrder, minOrder, requestedMaxOrder);
+    pane.lodDecision = {
+      ...roundDiagnosticNumbers(lodDecision),
+      minOrder,
+      requestedMaxOrder,
+      selectedOrder: pane.state.order
+    };
+  }
+
+  tileDiagnostics() {
+    return {
+      schema: "healpix-tilemap.tile-diagnostics.v1",
+      generatedAt: new Date().toISOString(),
+      debug: this.debugMode,
+      splitMode: this.splitMode,
+      activePaneId: this.activePaneId,
+      panes: this.visiblePanes().map((pane) => ({
+        id: pane.id,
+        datasetId: pane.datasetId,
+        layerId: pane.state.layerId,
+        view: pane.state.view,
+        order: pane.state.order,
+        maxOrder: pane.state.maxOrder,
+        lod: pane.lodDecision ?? null,
+        render: pane.renderStats ? { ...pane.renderStats } : null,
+        scheduler: pane.scheduler.diagnosticsSnapshot?.() ?? null,
+        cache: pane.cache.diagnosticsSnapshot?.() ?? pane.cache.stats?.() ?? null
+      }))
+    };
+  }
+
+  updateDebugDiagnostics(force = false) {
+    if (!this.debugPanel) {
+      return;
+    }
+    const now = performance.now();
+    if (!force && now - this.lastDebugPanelUpdate < 500) {
+      return;
+    }
+    this.lastDebugPanelUpdate = now;
+    const diagnostics = this.tileDiagnostics();
+    this.debugPanel.body.textContent = formatTileDiagnostics(diagnostics);
   }
 
   updateInspector(sample, pane = this.activePane()) {
@@ -2187,6 +2238,69 @@ async function copyText(text) {
   if (!copied) {
     throw new Error("Clipboard is unavailable.");
   }
+}
+
+function createDebugPanel() {
+  const element = document.createElement("section");
+  element.className = "debug-panel";
+  element.setAttribute("aria-label", "tile and LOD diagnostics");
+  element.innerHTML = `
+    <div class="debug-panel-head">
+      <strong>Tile/LOD Debug</strong>
+      <span>?debug=1</span>
+    </div>
+    <pre></pre>
+  `;
+  return {
+    element,
+    body: element.querySelector("pre")
+  };
+}
+
+function formatTileDiagnostics(diagnostics) {
+  const lines = [];
+  for (const pane of diagnostics.panes) {
+    const render = pane.render ?? {};
+    const scheduler = pane.scheduler ?? {};
+    const cache = pane.cache ?? {};
+    const lod = pane.lod ?? {};
+    const fallback = render.fallback ?? render.approximate ?? 0;
+    const lastLoad = [...(cache.recent ?? [])].reverse().find((event) => event.event === "load");
+    lines.push(`${pane.id} ${pane.datasetId} ${pane.view}`);
+    lines.push(`  LOD ${pane.order}/${pane.maxOrder} selected=${lod.selectedOrder ?? "-"} reason=${lod.reason ?? lod.view ?? "-"}`);
+    lines.push(`  render visible=${render.visible ?? 0} exact=${render.exact ?? 0} fallback=${fallback} missing=${render.missing ?? 0}`);
+    lines.push(`  target ${scheduler.targetTiles ?? 0} [${formatOrderCounts(scheduler.targetOrders ?? {})}]`);
+    lines.push(`  requested ${scheduler.wantedTiles ?? 0} [${formatOrderCounts(scheduler.wantedOrders ?? {})}] cache=${scheduler.cacheHits ?? 0} pending=${scheduler.pending ?? 0} queued=${scheduler.queued ?? 0}`);
+    lines.push(`  cache loaded=${cache.loaded ?? 0} pending=${cache.pending ?? 0} active=${cache.active ?? 0} hits=${cache.cacheHits ?? 0} bytes=${formatBytes(cache.bytes ?? 0)}`);
+    if (lastLoad) {
+      lines.push(`  last load ${lastLoad.tile ?? lastLoad.key ?? "-"} ${lastLoad.loadTimeMs ?? "-"}ms total=${lastLoad.totalTimeMs ?? "-"}ms`);
+    }
+  }
+  return lines.join("\n");
+}
+
+function roundDiagnosticNumbers(value) {
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? Math.round(value * 100) / 100 : value;
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => roundDiagnosticNumbers(item));
+  }
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, roundDiagnosticNumbers(item)]));
+  }
+  return value;
+}
+
+function formatBytes(bytes) {
+  const value = Number(bytes);
+  if (!Number.isFinite(value) || value <= 0) {
+    return "0";
+  }
+  if (value >= 1024 * 1024) {
+    return `${(value / (1024 * 1024)).toFixed(1)}MiB`;
+  }
+  return `${Math.max(1, Math.round(value / 1024))}KiB`;
 }
 
 function formatOrderCounts(counts) {

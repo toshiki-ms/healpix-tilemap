@@ -12,7 +12,7 @@ import {
   tileGridSize,
   tileKey
 } from "../core/tile-address.js";
-import { clampOrder, detailOrderForBasePixels } from "./lod.js";
+import { clampOrder, detailOrderForBasePixels, LOD_TARGET_TILE_PIXELS } from "./lod.js";
 import {
   addTileToSelection,
   addTilesAlongLine,
@@ -809,22 +809,49 @@ export class GlobeRenderer {
   }
 
   detailOrder(maxOrder = this.manifest.maxOrder) {
+    return this.lodDiagnostics(maxOrder).selectedOrder;
+  }
+
+  lodDiagnostics(maxOrder = this.manifest.maxOrder) {
     this.resize();
     const rect = this.canvas.getBoundingClientRect();
     const viewportPixels = Math.max(1, Math.min(rect.width, rect.height));
     const fov = THREE.MathUtils.degToRad(this.camera.fov);
     const cameraRadius = Math.max(GLOBE_MIN_CAMERA_RADIUS, this.camera.position.length());
+    const minOrder = this.manifest.minOrder ?? this.manifest.tileShift;
     if (cameraRadius <= this.controls.minDistance * GLOBE_MAX_DETAIL_DISTANCE_FACTOR) {
-      const minOrder = this.manifest.minOrder ?? this.manifest.tileShift;
-      return clampOrder(maxOrder, minOrder, this.manifest.maxOrder);
+      return {
+        view: "globe",
+        reason: "near-surface",
+        minOrder,
+        manifestMaxOrder: this.manifest.maxOrder,
+        requestedMaxOrder: maxOrder,
+        selectedOrder: clampOrder(maxOrder, minOrder, this.manifest.maxOrder),
+        cameraRadius,
+        fovDegrees: this.camera.fov,
+        viewportPixels,
+        targetTilePixels: LOD_TARGET_TILE_PIXELS
+      };
     }
     const focalPixels = (viewportPixels * 0.5) / Math.tan(fov * 0.5);
     const horizonDistance = Math.sqrt(Math.max(0.0001, cameraRadius * cameraRadius - GLOBE_RADIUS * GLOBE_RADIUS));
-    return detailOrderForBasePixels(
-      (focalPixels / horizonDistance) * GLOBE_LOD_FACE_FACTOR,
-      this.manifest,
-      maxOrder
-    );
+    const basePixels = (focalPixels / horizonDistance) * GLOBE_LOD_FACE_FACTOR;
+    return {
+      view: "globe",
+      reason: "projected-face-size",
+      minOrder,
+      manifestMaxOrder: this.manifest.maxOrder,
+      requestedMaxOrder: maxOrder,
+      selectedOrder: detailOrderForBasePixels(basePixels, this.manifest, maxOrder),
+      basePixels,
+      focalPixels,
+      horizonDistance,
+      cameraRadius,
+      fovDegrees: this.camera.fov,
+      viewportPixels,
+      targetTilePixels: LOD_TARGET_TILE_PIXELS,
+      faceFactor: GLOBE_LOD_FACE_FACTOR
+    };
   }
 
   draw() {
@@ -1802,6 +1829,7 @@ function emptyRenderStats(visible = 0) {
     orderCounts: {},
     exact: 0,
     approximate: 0,
+    fallback: 0,
     missing: visible,
     maxSourceOrder: null
   };
@@ -1825,5 +1853,6 @@ function updateRenderStats(stats, resolved, targetTile) {
     stats.exact += 1;
   } else {
     stats.approximate += 1;
+    stats.fallback += 1;
   }
 }

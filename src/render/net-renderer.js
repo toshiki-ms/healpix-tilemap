@@ -99,8 +99,21 @@ export class NetRenderer {
   }
 
   detailOrder(maxOrder = this.manifest.maxOrder) {
+    return this.lodDiagnostics(maxOrder).selectedOrder;
+  }
+
+  lodDiagnostics(maxOrder = this.manifest.maxOrder) {
     this.resize();
-    return detailOrderForBasePixels(this.transform.scale * Math.SQRT2, this.manifest, maxOrder);
+    const basePixels = this.transform.scale * Math.SQRT2;
+    return {
+      view: "net",
+      minOrder: this.manifest.minOrder ?? this.manifest.tileShift,
+      manifestMaxOrder: this.manifest.maxOrder,
+      requestedMaxOrder: maxOrder,
+      selectedOrder: detailOrderForBasePixels(basePixels, this.manifest, maxOrder),
+      basePixels,
+      targetTilePixels: LOD_TARGET_TILE_PIXELS
+    };
   }
 
   draw() {
@@ -455,6 +468,7 @@ function emptyRenderStats(visible = 0) {
     orderCounts: {},
     exact: 0,
     approximate: 0,
+    fallback: 0,
     missing: visible,
     maxSourceOrder: null
   };
@@ -478,5 +492,6 @@ function updateRenderStats(stats, resolved, targetTile) {
     stats.exact += 1;
   } else {
     stats.approximate += 1;
+    stats.fallback += 1;
   }
 }

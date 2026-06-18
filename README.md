@@ -325,6 +325,30 @@ Chromium on the machine running Python. Set `CHROME_BIN=/path/to/chrome`, pass
 `chrome=...`, or use `hpxviewer-export --chrome /path/to/chrome` if it is not on
 `PATH`.
 
+## Tile And LOD Diagnostics
+
+Add `debug=1` to the viewer URL to enable diagnostics that are hidden in normal
+use:
+
+```text
+http://127.0.0.1:4181/?dataset=earth-elevation-n8192&debug=1
+```
+
+Debug mode adds a small `Tile/LOD Debug` panel and exposes the same structured
+snapshot in the browser console:
+
+```js
+window.__hpxApp.tileDiagnostics()
+// or
+window.__hpxTileDiagnostics()
+```
+
+The snapshot reports, per visible pane, the LOD decision, requested target
+tiles, parent-tile requests, exact/fallback/missing render counts, cache hits,
+pending/queued requests, and recent tile load times. This is intended for
+checking whether a high-order view is really drawing exact tiles or silently
+falling back to parent tiles.
+
 ## Notebook Workflow
 
 Install the Python helper in the same environment as the Jupyter kernel:

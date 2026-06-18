@@ -744,6 +744,47 @@ select {
   white-space: nowrap;
 }
 
+.debug-panel {
+  position: absolute;
+  top: 112px;
+  right: 16px;
+  width: min(420px, calc(100vw - 32px));
+  max-height: min(50vh, 520px);
+  border: 1px solid rgba(120, 214, 234, 0.32);
+  border-radius: 8px;
+  background: rgba(18, 21, 24, 0.88);
+  backdrop-filter: blur(18px);
+  box-shadow: 0 16px 36px rgba(0, 0, 0, 0.28);
+  color: #d9f2f5;
+  z-index: 8;
+  pointer-events: auto;
+}
+
+.debug-panel-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 9px 11px 7px;
+  border-bottom: 1px solid rgba(120, 214, 234, 0.18);
+  font-size: 12px;
+}
+
+.debug-panel-head span {
+  color: #a9d4df;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+}
+
+.debug-panel pre {
+  max-height: calc(min(50vh, 520px) - 38px);
+  margin: 0;
+  overflow: auto;
+  padding: 9px 11px 11px;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 11px;
+  line-height: 1.42;
+  white-space: pre-wrap;
+}
+
 .colorbar {
   position: absolute;
   right: 16px;

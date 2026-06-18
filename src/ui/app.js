@@ -60,7 +60,9 @@ export class App {
       copyUrlButton: document.querySelector("#copyUrlButton"),
       copyPythonButton: document.querySelector("#copyPythonButton"),
       applyJsonButton: document.querySelector("#applyJsonButton"),
+      loadViewStateButton: document.querySelector("#loadViewStateButton"),
       exportMetadataButton: document.querySelector("#exportMetadataButton"),
+      viewStateFileInput: document.querySelector("#viewStateFileInput"),
       viewJsonInput: document.querySelector("#viewJsonInput"),
       openExportButton: document.querySelector("#openExportButton"),
       exportDialog: document.querySelector("#exportDialog"),
@@ -439,6 +441,11 @@ npm run dev</pre>
       });
     }
     this.controls.applyJsonButton.addEventListener("click", () => this.applyViewJson());
+    this.controls.loadViewStateButton.addEventListener("click", () => {
+      this.controls.viewStateFileInput.value = "";
+      this.controls.viewStateFileInput.click();
+    });
+    this.controls.viewStateFileInput.addEventListener("change", () => this.loadViewStateFile());
     this.controls.copyViewButton.addEventListener("click", () => this.copyViewJson());
     this.controls.copyUrlButton.addEventListener("click", () => this.copyViewUrl());
     this.controls.copyPythonButton.addEventListener("click", () => this.copyViewPython());
@@ -648,6 +655,7 @@ npm run dev</pre>
       exportScale: previous.exportScale,
       exportWidth: previous.exportWidth,
       exportHeight: previous.exportHeight,
+      exportTransparent: previous.exportTransparent,
       ...overrides
     });
     pane.renderStats = null;
@@ -801,9 +809,33 @@ npm run dev</pre>
     } else {
       await this.applySinglePaneViewState(this.activePane(), patch);
     }
+    this.applyExportViewState(patch);
     this.updateDisplayControls();
     this.writeUrlState();
     return this.stateSnapshot();
+  }
+
+  applyExportViewState(patch = {}) {
+    const source = patch.export && typeof patch.export === "object" ? patch.export : patch;
+    if (source.mode !== undefined || source.exportMode !== undefined) {
+      this.state.exportMode = normalizeExportMode(source.mode ?? source.exportMode);
+    }
+    const scale = Number(source.scale ?? source.exportScale);
+    if (Number.isFinite(scale) && scale > 0) {
+      this.state.exportScale = Math.max(1, Math.min(4, Math.round(scale)));
+    }
+    if (source.width !== undefined || source.exportWidth !== undefined) {
+      this.state.exportWidth = exportDimensionString(source.width ?? source.exportWidth);
+    }
+    if (source.height !== undefined || source.exportHeight !== undefined) {
+      this.state.exportHeight = exportDimensionString(source.height ?? source.exportHeight);
+    }
+    if (source.embedMetadata !== undefined || source.exportEmbedMetadata !== undefined) {
+      this.state.exportEmbedMetadata = Boolean(source.embedMetadata ?? source.exportEmbedMetadata);
+    }
+    if (source.transparent !== undefined || source.exportTransparent !== undefined) {
+      this.state.exportTransparent = Boolean(source.transparent ?? source.exportTransparent);
+    }
   }
 
   async applySplitViewState(patch = {}) {
@@ -1291,6 +1323,7 @@ npm run dev</pre>
     const activeState = this.paneViewState(active);
     const panes = Object.fromEntries(this.panes.map((pane) => [pane.id, this.paneViewState(pane)]));
     return {
+      schema: "healpix-tilemap.view-state.v1",
       type: "hpxviewer:view",
       version: 2,
       split: this.splitMode,
@@ -1304,6 +1337,14 @@ npm run dev</pre>
       footprintColor: this.footprintColor,
       overview: this.overviewMode,
       overviewMode: this.overviewMode,
+      export: {
+        mode: this.state.exportMode,
+        scale: this.state.exportScale,
+        width: this.state.exportWidth,
+        height: this.state.exportHeight,
+        embedMetadata: this.state.exportEmbedMetadata,
+        transparent: this.state.exportTransparent
+      },
       ...activeState,
       panes
     };
@@ -1347,6 +1388,26 @@ npm run dev</pre>
       this.setViewStatus("Applied view JSON.");
     } catch (error) {
       this.setViewStatus(`Apply failed: ${errorMessage(error)}`);
+    }
+  }
+
+  async loadViewStateFile() {
+    const file = this.controls.viewStateFileInput.files?.[0];
+    if (!file) {
+      return;
+    }
+    this.setViewStatus(`Loading ${file.name}...`);
+    try {
+      const text = await file.text();
+      const parsed = JSON.parse(text);
+      await this.setViewState(parsed);
+      this.controls.viewJsonInput.value = JSON.stringify(parsed, null, 2);
+      this.viewInputsDirty = false;
+      this.updateViewPanel(true);
+      this.writeUrlState();
+      this.setViewStatus(`Loaded ${file.name}.`);
+    } catch (error) {
+      this.setViewStatus(`Load failed: ${errorMessage(error)}`);
     }
   }
 
@@ -1468,7 +1529,7 @@ npm run dev</pre>
     this.controls.exportDialogScaleSelect.value = String(this.state.exportScale);
     this.controls.exportDialogWidthInput.value = this.state.exportWidth;
     this.controls.exportDialogHeightInput.value = this.state.exportHeight;
-    this.controls.exportDialogTransparentToggle.checked = false;
+    this.controls.exportDialogTransparentToggle.checked = extension === "png" && this.state.exportTransparent;
     this.controls.exportDialogMetadataToggle.checked = this.state.exportEmbedMetadata;
     this.controls.exportFilenameInput.value = defaultExportFileName(this, extension);
     this.updateExportFilenameExtension();
@@ -1539,6 +1600,7 @@ npm run dev</pre>
       this.state.exportScale = Number(this.controls.exportDialogScaleSelect.value);
       this.state.exportWidth = this.controls.exportDialogWidthInput.value;
       this.state.exportHeight = this.controls.exportDialogHeightInput.value;
+      this.state.exportTransparent = transparent;
       this.state.exportEmbedMetadata = embedMetadata;
       this.setExportStatus(exportResultMessage(result));
       if (result.method !== "canceled") {
@@ -1707,6 +1769,7 @@ function defaultViewerState() {
     exportScale: 1,
     exportWidth: "",
     exportHeight: "",
+    exportTransparent: false,
     viewPanel: true
   };
 }
@@ -1841,6 +1904,14 @@ function normalizeColor(value, fallback = "#000000") {
 
 function normalizeExportMode(value) {
   return ["active", "left", "right", "split"].includes(value) ? value : "active";
+}
+
+function exportDimensionString(value) {
+  if (value === "" || value === null || value === undefined) {
+    return "";
+  }
+  const number = Number(value);
+  return Number.isFinite(number) && number >= 64 ? String(Math.round(number)) : "";
 }
 
 function rightDatasetIdFromUrl(catalog, fallback) {

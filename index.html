@@ -166,8 +166,10 @@
         </div>
         <div class="view-actions">
           <button id="applyJsonButton" type="button">Apply JSON</button>
+          <button id="loadViewStateButton" type="button" title="Load a saved view_state.json file">Load JSON</button>
           <button id="exportMetadataButton" type="button" title="Save the current view state as a JSON file">Save JSON</button>
           <button id="openExportButton" type="button">Save Image</button>
+          <input id="viewStateFileInput" type="file" accept="application/json,.json" hidden />
         </div>
         <textarea id="viewJsonInput" rows="4" spellcheck="false" aria-label="view JSON"></textarea>
       </section>

@@ -15,8 +15,9 @@ user must generate or convert local datasets before the map can show data.
 - Zoom-driven LOD selection with parent-tile fallback.
 - Float32, uint16, and int16 scalar tiles.
 - Shader-side colormap, min/max, linear/log/symlog scaling, and relief shading.
-- Camera/view-state panel with copyable JSON/URL/Python, globe coordinate axes,
-  graticule, scale bar, and PNG/JPG export.
+- Camera/view-state panel with reusable `view_state.json`, copyable
+  JSON/URL/Python, globe coordinate axes, graticule, scale bar, and PNG/JPG
+  export.
 - Hover inspector for HEALPix cell, face-local coordinates, lon/lat, value, and
   source tile.
 - Right-drag tile painting. The viewer returns compact HEALPix `tileRanges` and
@@ -198,8 +199,16 @@ exact 180-degree perspective projection is singular.
 
 `JSON` copies the current view state, and `URL` copies a shareable URL that
 includes dataset, layer, order, colormap, scale, camera, axes, graticule, scale
-bar, north-up, and panel state. Paste edited JSON into the panel and press
-`Apply JSON` to restore a view.
+bar, north-up, split layout, and panel state. Paste edited JSON into the panel
+and press `Apply JSON` to restore a view.
+
+`Save JSON` writes the same state as a standalone scene file. The file uses
+`schema: "healpix-tilemap.view-state.v1"` and includes the active pane, split
+mode, overview/footprint state, per-pane dataset/layer/color/camera settings,
+net pan/zoom transforms, and export options such as target pane, output scale,
+width/height, transparency, and metadata embedding. `Load JSON` reads such a
+file back into the viewer, so a saved `view_state.json` is the preferred way to
+reproduce a figure setup.
 
 `Python` copies a notebook-ready snippet using the existing helper API:
 
@@ -241,15 +250,15 @@ angular distance (`deg`, `arcmin`, or `arcsec`) so the viewer does not imply an
 Earth-sized body for abstract maps.
 
 The `Save Image` button opens an export dialog where the file name, format,
-content, output scale, explicit width/height, PNG transparency, and metadata
+target, output scale, explicit width/height, PNG transparency, and metadata
 embedding can be confirmed before saving. The export dialog writes local files
 from the current view:
 
 ```text
-Map              rendered map/globe only
-Map + colorbar   map plus colorbar
-Map + inspector  map plus colorbar and inspector
-Viewer           map plus simplified toolbar, inspector, and colorbar
+Active pane          active pane plus colorbar
+Left / top pane      left or top pane plus colorbar
+Right / bottom pane  right or bottom pane plus colorbar
+Split panes          both panes as one figure
 ```
 
 PNG and JPG exports support 1x, 2x, and 4x output scale. Set `Width` and/or
@@ -257,8 +266,7 @@ PNG and JPG exports support 1x, 2x, and 4x output scale. Set `Width` and/or
 times the selected scale. The export dialog's `Transparent PNG` option removes
 the viewer background color from PNG output. `Embed metadata` stores the
 dataset, layer, camera, and view-state JSON inside PNG `iTXt` metadata or JPG
-XMP. The separate `Save JSON` button writes the same view-state JSON as a
-standalone file.
+XMP.
 
 The Python helper can save a figure without showing a browser window. It starts
 or reuses the local viewer server, opens the viewer in headless Chrome, and uses

@@ -425,6 +425,138 @@ npm run validate:generated
 npm run dev
 ```
 
+## Convert HEALPix-Indexed Particles
+
+Use `tools/make_particle_tiles.py` when your source data is a large particle
+table and each particle is already assigned to a HEALPix NESTED cell. This is
+the path for catalogs, tracer particles, or simulation particles where drawing
+the raw points would be too expensive. The converter does not build a dense
+full-sky scalar array. It streams particle chunks, aggregates them into parent
+cells for each output order, and writes only non-empty sparse tiles.
+
+Expected Zarr v3 layout:
+
+```text
+particles.zarr
+  cell   uint64   shape=(n_particles,)  global NESTED id at particle_order
+  value  float32  shape=(n_particles,)  optional scalar value to average or sum
+```
+
+`cell` must contain NESTED HEALPix ids in the range
+`0 <= cell < 12 * 4**particle_order`. If your source data starts from
+longitude/latitude, convert those coordinates to NESTED ids before running this
+converter.
+
+Minimal Zarr v3 input example:
+
+```python
+import numpy as np
+import zarr
+
+particle_order = 18
+n_particles = 10_000_000
+rng = np.random.default_rng(1)
+
+root = zarr.open_group("data/particles.zarr", mode="w", zarr_format=3)
+cell = root.create_array(
+    "cell",
+    shape=(n_particles,),
+    chunks=(1_000_000,),
+    dtype="uint64",
+)
+mixing_ratio = root.create_array(
+    "mixing_ratio",
+    shape=(n_particles,),
+    chunks=(1_000_000,),
+    dtype="float32",
+)
+cell.attrs["_ARRAY_DIMENSIONS"] = ["particle"]
+mixing_ratio.attrs["_ARRAY_DIMENSIONS"] = ["particle"]
+
+for start in range(0, n_particles, 1_000_000):
+    stop = min(n_particles, start + 1_000_000)
+    count = stop - start
+    cell[start:stop] = rng.integers(0, 12 * 4**particle_order, size=count, dtype=np.uint64)
+    mixing_ratio[start:stop] = rng.random(count, dtype=np.float32)
+```
+
+Convert a per-particle scalar to cell means:
+
+```sh
+npm run convert:particles -- \
+  --input data/particles.zarr \
+  --cell-array cell \
+  --value-array mixing_ratio \
+  --particle-order 18 \
+  --aggregation mean \
+  --target-particles-per-cell 1 \
+  --min-order 8 \
+  --tile-size 256 \
+  --output public/datasets/my-particles \
+  --dataset-id my-particles \
+  --title "My particle aggregate" \
+  --layer-id mixing_ratio \
+  --layer-title "Mean mixing ratio" \
+  --default-view globe \
+  --colormap turbo \
+  --scale linear \
+  --force
+```
+
+Convert occupancy counts instead:
+
+```sh
+npm run convert:particles -- \
+  --input data/particles.zarr \
+  --cell-array cell \
+  --particle-order 18 \
+  --aggregation count \
+  --min-order 8 \
+  --max-order 14 \
+  --tile-size 256 \
+  --output public/datasets/my-particle-counts \
+  --dataset-id my-particle-counts \
+  --title "My particle counts" \
+  --layer-id count \
+  --layer-title "Particle count" \
+  --scale log \
+  --force
+```
+
+Aggregation modes:
+
+```text
+count  number of particles in each displayed cell; --value-array is omitted
+sum    sum of --value-array values in each displayed cell
+mean   mean of --value-array values in each displayed cell
+```
+
+At output order `k`, the converter maps each source particle cell to its parent
+cell by shifting away `2 * (particle_order - k)` bits. This means lower orders
+show coarse aggregates, while higher orders approach individual particle
+positions. `--max-order` cannot exceed `--particle-order`. If `--max-order` is
+omitted, the converter chooses the smallest order whose mean occupancy is close
+to `--target-particles-per-cell`, capped by `--particle-order`.
+
+`--min-order` must be at least `log2(tile-size)`. Use `--tile-size 256` for
+`--min-order 8` or higher. Use `--tile-size 128` if the pyramid should start at
+order 7. Missing sparse tiles are treated as empty by the viewer: `NaN` for
+`mean`, and `0` for `count` or `sum`.
+
+For a reproducible local demo, generate a global particle table where every
+HEALPix cell has multiple particles and each particle carries a noisy
+`mixing_ratio`. The tile pyramid displays the mean mixing ratio per cell:
+
+```sh
+npm run generate:particle-mixing-demo
+npm run dev
+```
+
+The demo uses `base_order=8`, `particle_order=11`, and 16 particles per base
+cell. It starts at order 7 with about 64 particles per displayed cell, then
+about 16 particles per cell at order 8, 4 particles per cell at order 9, 1
+particle per cell at order 10, and a sparse particle-position view at order 11.
+
 ## Optional MCP Server
 
 Install the MCP server dependencies:

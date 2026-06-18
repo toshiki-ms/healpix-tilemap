@@ -23,10 +23,17 @@ import { sampleTileValue } from "./tile-visual.js";
 
 const PATCH_SEGMENTS = 18;
 const GLOBE_RADIUS = 1.004;
+const GLOBE_MIN_CAMERA_ALTITUDE = 0.075;
+const GLOBE_MIN_CAMERA_RADIUS = GLOBE_RADIUS + GLOBE_MIN_CAMERA_ALTITUDE;
 const GLOBE_LOD_FACE_FACTOR = 1.45;
 const GLOBE_MAX_DETAIL_DISTANCE_FACTOR = 1.04;
 const MAX_GLOBE_VISIBLE_TILES = 1100;
 const TILE_BOUNDING_RADIUS_SCALE = 1.12;
+const NEAR_HORIZON_CULL_MARGIN = 0.035;
+const FAR_HORIZON_CULL_MARGIN = 0.22;
+const NEAR_FOCUS_DETAIL_ANGLE = 0.11;
+const FAR_FOCUS_DETAIL_ANGLE = 1.15;
+const FOCUS_DETAIL_DISTANCE_SPAN = 1.2;
 const SURFACE_DRAG_GAIN = 1.35;
 const MIN_ROTATE_SPEED = 0.006;
 const MAX_ROTATE_SPEED = 0.55;
@@ -266,7 +273,7 @@ export class GlobeRenderer {
     this.controls.enableDamping = true;
     this.controls.dampingFactor = 0.08;
     this.controls.enablePan = false;
-    this.controls.minDistance = 1.045;
+    this.controls.minDistance = GLOBE_MIN_CAMERA_RADIUS;
     this.controls.maxDistance = 6.5;
     this.controls.zoomToCursor = true;
     this.updateInteractionScale();
@@ -339,6 +346,7 @@ export class GlobeRenderer {
   resetView() {
     this.camera.position.set(3.2, 2.15, 1.7);
     this.controls.target.set(0, 0, 0);
+    this.constrainCameraOutsideGlobe();
     this.updateInteractionScale();
     this.controls.update();
   }
@@ -352,12 +360,14 @@ export class GlobeRenderer {
     this.controls.target.set(0, 0, 0);
     this.camera.position.copy(direction.multiplyScalar(targetDistance));
     this.camera.lookAt(0, 0, 0);
+    this.constrainCameraOutsideGlobe();
     this.updateInteractionScale();
     this.controls.update();
   }
 
   desiredTiles() {
     this.resize();
+    this.constrainCameraOutsideGlobe();
     this.camera.updateMatrixWorld();
     this.camera.updateProjectionMatrix();
     const frustum = new THREE.Frustum();
@@ -368,12 +378,17 @@ export class GlobeRenderer {
     frustum.setFromProjectionMatrix(projectionScreen);
     const cameraPosition = this.camera.position;
     const cameraDirection = this.camera.position.clone().normalize();
-    const minDot = this.state.order <= this.manifest.minOrder ? -1.0 : -0.42;
+    const cameraDistance = cameraPosition.length();
+    const focusDirection = this.surfaceFocusDirection();
+    const minDot =
+      this.state.order <= this.manifest.minOrder ? -1.0 : this.horizonCullMinDot(cameraDistance);
     this.visibleTiles = this.traverseVisibleTiles({
       targetOrder: this.state.order,
       frustum,
       cameraPosition,
       cameraDirection,
+      cameraDistance,
+      focusDirection,
       minDot
     })
       .sort((a, b) => a.priority - b.priority || b.dot - a.dot)
@@ -382,7 +397,15 @@ export class GlobeRenderer {
     return this.visibleTiles;
   }
 
-  traverseVisibleTiles({ targetOrder, frustum, cameraPosition, cameraDirection, minDot }) {
+  traverseVisibleTiles({
+    targetOrder,
+    frustum,
+    cameraPosition,
+    cameraDirection,
+    cameraDistance,
+    focusDirection,
+    minDot
+  }) {
     const minOrder = this.manifest.minOrder ?? this.manifest.tileShift;
     const rootGrid = tileGridSize(minOrder, this.manifest.tileShift);
     const stack = [];
@@ -399,10 +422,17 @@ export class GlobeRenderer {
       const tile = stack.pop();
       const sphere = this.tileSphere(tile);
       const dot = cameraDirection.dot(sphere.center.clone().normalize());
-      if (dot <= minDot || !frustum.intersectsSphere(sphere)) {
+      if (dot + sphereDotPadding(sphere) <= minDot || !frustum.intersectsSphere(sphere)) {
         continue;
       }
-      if (tile.order < targetOrder) {
+      if (
+        tile.order < targetOrder &&
+        tileIntersectsAngularCap(
+          focusDirection,
+          sphere,
+          this.focusDetailAngle(tile.order + 1, targetOrder, cameraDistance)
+        )
+      ) {
         stack.push(...childTiles(tile));
         continue;
       }
@@ -437,8 +467,9 @@ export class GlobeRenderer {
   draw() {
     this.resize();
     this.syncMeshes();
-    this.updateInteractionScale();
     this.controls.update();
+    this.constrainCameraOutsideGlobe();
+    this.updateInteractionScale();
     this.renderer.render(this.scene, this.camera);
   }
 
@@ -447,6 +478,7 @@ export class GlobeRenderer {
     const wanted = new Set(visibleTiles.map((tile) => tileKey(tile)));
     const usedTextureKeys = new Set();
     const stats = emptyRenderStats(visibleTiles.length);
+    stats.orderCounts = orderCounts(visibleTiles);
     for (const [key, mesh] of this.meshes) {
       if (!wanted.has(key)) {
         this.scene.remove(mesh);
@@ -563,6 +595,56 @@ export class GlobeRenderer {
     const zoomT = THREE.MathUtils.clamp((distance - 1.15) / 2.5, 0, 1);
     this.controls.zoomSpeed = THREE.MathUtils.lerp(NEAR_ZOOM_SPEED, FAR_ZOOM_SPEED, zoomT);
     this.controls.dampingFactor = THREE.MathUtils.lerp(NEAR_DAMPING, FAR_DAMPING, zoomT);
+  }
+
+  horizonCullMinDot(distance) {
+    const safeDistance = Math.max(GLOBE_MIN_CAMERA_RADIUS, distance);
+    const horizonDot = GLOBE_RADIUS / safeDistance;
+    const farT = THREE.MathUtils.clamp(
+      (safeDistance - GLOBE_MIN_CAMERA_RADIUS) / (this.controls.maxDistance - GLOBE_MIN_CAMERA_RADIUS),
+      0,
+      1
+    );
+    const margin = THREE.MathUtils.lerp(NEAR_HORIZON_CULL_MARGIN, FAR_HORIZON_CULL_MARGIN, farT);
+    return THREE.MathUtils.clamp(horizonDot - margin, -0.1, 0.92);
+  }
+
+  focusDetailAngle(nextOrder, targetOrder, distance) {
+    const farT = THREE.MathUtils.clamp(
+      (distance - GLOBE_MIN_CAMERA_RADIUS) / FOCUS_DETAIL_DISTANCE_SPAN,
+      0,
+      1
+    );
+    const baseAngle = THREE.MathUtils.lerp(NEAR_FOCUS_DETAIL_ANGLE, FAR_FOCUS_DETAIL_ANGLE, farT);
+    return Math.min(Math.PI, baseAngle * 2 ** Math.max(0, targetOrder - nextOrder));
+  }
+
+  surfaceFocusDirection() {
+    const origin = this.camera.position.clone();
+    const direction = new THREE.Vector3();
+    this.camera.getWorldDirection(direction);
+    const hit = raySphereIntersection(origin, direction, GLOBE_RADIUS);
+    if (hit) {
+      return hit.normalize();
+    }
+    if (this.controls.target.lengthSq() > 1e-8) {
+      return this.controls.target.clone().normalize();
+    }
+    return origin.normalize();
+  }
+
+  constrainCameraOutsideGlobe() {
+    const radius = this.camera.position.length();
+    if (radius >= GLOBE_MIN_CAMERA_RADIUS) {
+      return;
+    }
+    if (radius <= 1e-8) {
+      this.camera.position.set(0, -GLOBE_MIN_CAMERA_RADIUS, 0);
+      this.camera.lookAt(this.controls.target);
+      return;
+    }
+    this.camera.position.multiplyScalar(GLOBE_MIN_CAMERA_RADIUS / radius);
+    this.camera.lookAt(this.controls.target);
   }
 
   inspectAt(clientX, clientY) {
@@ -995,14 +1077,51 @@ function tileBoundingSphere(tile, tileShift) {
   return new THREE.Sphere(center, radius);
 }
 
+function sphereDotPadding(sphere) {
+  return Math.min(1, sphere.radius / Math.max(1e-6, sphere.center.length()));
+}
+
+function tileIntersectsAngularCap(direction, sphere, capAngle) {
+  const center = sphere.center.clone().normalize();
+  const centerAngle = Math.acos(THREE.MathUtils.clamp(direction.dot(center), -1, 1));
+  const angularRadius = Math.asin(Math.min(1, sphere.radius / Math.max(1e-6, sphere.center.length())));
+  return centerAngle - angularRadius <= capAngle;
+}
+
+function raySphereIntersection(origin, direction, radius) {
+  const b = origin.dot(direction);
+  const c = origin.lengthSq() - radius * radius;
+  const discriminant = b * b - c;
+  if (discriminant < 0) {
+    return null;
+  }
+  const root = Math.sqrt(discriminant);
+  const near = -b - root;
+  const far = -b + root;
+  const t = near >= 0 ? near : far;
+  if (t < 0) {
+    return null;
+  }
+  return origin.clone().addScaledVector(direction, t);
+}
+
 function emptyRenderStats(visible = 0) {
   return {
     visible,
+    orderCounts: {},
     exact: 0,
     approximate: 0,
     missing: visible,
     maxSourceOrder: null
   };
+}
+
+function orderCounts(tiles) {
+  const counts = {};
+  for (const tile of tiles) {
+    counts[tile.order] = (counts[tile.order] ?? 0) + 1;
+  }
+  return counts;
 }
 
 function updateRenderStats(stats, resolved, targetTile) {

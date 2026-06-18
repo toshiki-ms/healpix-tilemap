@@ -152,6 +152,8 @@ export class TileCache extends EventTarget {
         if (pending.state === "queued") {
           this.pending.delete(key);
           pending.reject(abortError());
+        } else if (pending.state === "active") {
+          pending.controller?.abort();
         }
       }
     }

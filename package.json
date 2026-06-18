@@ -1,0 +1,34 @@
+{
+  "name": "healpix-tile-map-viewer",
+  "version": "0.1.0",
+  "description": "High-resolution HEALPix tile map viewer prototype.",
+  "license": "BSD-2-Clause",
+  "type": "module",
+  "scripts": {
+    "dev": "npm run build:wasm && vite --host 0.0.0.0 --port 4181",
+    "build": "npm run build:wasm && vite build",
+    "build:wasm": "mkdir -p public/wasm && wat2wasm src/wasm/tile_decode.wat -o public/wasm/tile_decode.wasm",
+    "preview": "vite preview --host 0.0.0.0 --port 4181",
+    "download:etopo2022:60s": "mkdir -p data && curl -L --fail --continue-at - --output data/ETOPO_2022_v1_60s_N90W180_bed.nc https://www.ngdc.noaa.gov/thredds/fileServer/global/ETOPO2022/60s/60s_bed_elev_netcdf/ETOPO_2022_v1_60s_N90W180_bed.nc",
+    "download:etopo2022:15s": "python3 tools/download_etopo2022_15s_surface.py",
+    "generate:spectral:8192": "python3 tools/make_spherical_harmonic_noise.py --output public/datasets/spectral-noise-n8192 --nside 8192 --min-order 11 --tile-size 256 --lmax-factor 1.0 --force && npm run register:dataset -- --id spectral-noise-n8192 --title \"Spherical harmonic noise nside 8192\" --manifest spectral-noise-n8192/manifest.json --default",
+    "generate:earth:1024": "python3 tools/make_earth_elevation.py --source data/ETOPO_2022_v1_60s_N90W180_bed.nc --output public/datasets/earth-elevation-n1024 --nside 1024 --min-order 8 --tile-size 256 --tile-dtype uint16 --quantize-min -12000 --quantize-max 9000 --force && npm run register:dataset -- --id earth-elevation-n1024 --title \"Earth elevation nside 1024\" --manifest earth-elevation-n1024/manifest.json",
+    "generate:earth:8192": "python3 tools/make_earth_elevation.py --source data/ETOPO2022_15s_surface/ETOPO_2022_v1_15s_surface.vrt --output public/datasets/earth-elevation-n8192 --nside 8192 --min-order 11 --tile-size 256 --tile-dtype uint16 --quantize-min -12000 --quantize-max 9000 --force && npm run register:dataset -- --id earth-elevation-n8192 --title \"Earth elevation nside 8192\" --manifest earth-elevation-n8192/manifest.json",
+    "convert:hpx": "python3 tools/make_hpx_tiles.py",
+    "quantize:earth:8192": "python3 tools/quantize_tile_layer.py public/datasets/earth-elevation-n8192/manifest.json --layer-id elevation_m --tile-dtype uint16 --quantize-min -12000 --quantize-max 9000",
+    "register:dataset": "python3 tools/register_dataset.py",
+    "validate:generated": "python3 tools/validate_tiles.py public/datasets/*/manifest.json",
+    "mcp:start": "npm --prefix mcp-server run start",
+    "mcp:smoke": "npm --prefix mcp-server run smoke",
+    "test:core": "node scripts/test-core.js",
+    "test:wasm": "npm run build:wasm && node scripts/test-wasm.js",
+    "test": "npm run test:core && npm run test:wasm"
+  },
+  "dependencies": {
+    "three": "0.184.0"
+  },
+  "devDependencies": {
+    "vite": "8.0.16",
+    "wabt": "^1.0.39"
+  }
+}

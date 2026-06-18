@@ -1,0 +1,19 @@
+{
+  "name": "hpx-viewer-mcp-server",
+  "version": "0.1.0",
+  "description": "MCP tools for controlling the HEALPix tile map viewer.",
+  "license": "BSD-2-Clause",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "hpx-viewer-mcp": "src/server.js"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "smoke": "node src/smoke.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "zod": "^4.2.0"
+  }
+}

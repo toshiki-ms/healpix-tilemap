@@ -1,0 +1,20 @@
+node_modules/
+/dist/
+.vite/
+*.log
+
+# Local/generated data. Published repositories must not include tile pyramids,
+# DEM downloads, or notebook scratch files.
+/data/
+public/datasets/*
+!public/datasets/.gitkeep
+!public/datasets/README.md
+!public/datasets/index.example.json
+public/wasm/*.wasm
+/artifacts/
+*.ipynb
+.ipynb_checkpoints/
+
+# Python cache files.
+__pycache__/
+*.py[cod]

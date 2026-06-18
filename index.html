@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>HEALPix Tile Map Viewer</title>
+    <link rel="stylesheet" href="./src/styles.css" />
+  </head>
+  <body>
+    <main class="app-shell" aria-label="HEALPix tile map viewer">
+      <canvas id="mapCanvas" class="map-canvas" aria-label="HEALPix map"></canvas>
+      <canvas id="globeCanvas" class="globe-canvas" aria-label="HEALPix globe"></canvas>
+
+      <section class="toolbar" aria-label="viewer controls">
+        <div class="brand">
+          <h1>HEALPix Tile Map</h1>
+          <span id="datasetStatus">Loading dataset</span>
+        </div>
+
+        <label>
+          Dataset
+          <select id="datasetSelect"></select>
+        </label>
+
+        <label>
+          View
+          <select id="viewMode">
+            <option value="net">2D net</option>
+            <option value="globe">3D globe</option>
+          </select>
+        </label>
+
+        <label>
+          Layer
+          <select id="layerSelect"></select>
+        </label>
+
+        <label>
+          Max order
+          <select id="orderSelect"></select>
+        </label>
+
+        <label>
+          Colormap
+          <select id="colormapSelect">
+            <option value="viridis">Viridis</option>
+            <option value="magma">Magma</option>
+            <option value="turbo">Turbo</option>
+            <option value="balance">Balance</option>
+          </select>
+        </label>
+
+        <label>
+          Scale
+          <select id="scaleSelect">
+            <option value="linear">Linear</option>
+            <option value="symlog">Symlog</option>
+            <option value="log">Log</option>
+          </select>
+        </label>
+
+        <label class="number-field">
+          Min
+          <input id="minInput" type="number" step="0.01" />
+        </label>
+
+        <label class="number-field">
+          Max
+          <input id="maxInput" type="number" step="0.01" />
+        </label>
+
+        <button id="autoStretchButton" type="button">Auto</button>
+        <button id="reliefToggle" type="button" aria-pressed="true">Relief</button>
+        <button id="gridToggle" type="button" aria-pressed="true">Grid</button>
+        <button id="resetViewButton" type="button">Reset</button>
+      </section>
+
+      <section class="inspector" aria-label="cell inspector">
+        <div class="inspector-head">
+          <span>Inspector</span>
+          <strong id="loadStatus">0 tiles</strong>
+        </div>
+        <dl>
+          <div><dt>Cell</dt><dd id="cellValue">-</dd></div>
+          <div><dt>Face</dt><dd id="faceValue">-</dd></div>
+          <div><dt>Local</dt><dd id="localValue">-</dd></div>
+          <div><dt>Lon/Lat</dt><dd id="lonLatValue">-</dd></div>
+          <div><dt>Value</dt><dd id="sampleValue">-</dd></div>
+          <div><dt>Tile</dt><dd id="tileValue">-</dd></div>
+        </dl>
+      </section>
+
+      <section class="colorbar" aria-label="colorbar">
+        <div id="colorbarRamp" class="colorbar-ramp"></div>
+        <div class="colorbar-labels">
+          <span id="colorMin">-</span>
+          <span id="colorMax">-</span>
+        </div>
+      </section>
+    </main>
+
+    <script type="module" src="./src/main.js"></script>
+  </body>
+</html>

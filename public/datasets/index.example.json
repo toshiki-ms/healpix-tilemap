@@ -1,0 +1,10 @@
+{
+  "default": "spectral-noise-n8192",
+  "datasets": [
+    {
+      "id": "spectral-noise-n8192",
+      "title": "Spherical harmonic noise nside 8192",
+      "manifest": "spectral-noise-n8192/manifest.json"
+    }
+  ]
+}

@@ -1,6 +1,6 @@
 # HEALPix Tile Map Viewer
 
-High-resolution web tile map viewer for full-sky HEALPix scalar data.
+High-resolution web tile map viewer for HEALPix scalar data on spherical surfaces.
 
 This repository contains the viewer, tile generators, notebook helpers, and MCP
 server. It does not contain generated tile pyramids or DEM source data. A new
@@ -232,7 +232,7 @@ tiles.to_dataframe("cell_ranges", order=13)
 tiles.to_dataframe("nested_ranges", order=13)
 ```
 
-If you have a full-sky NESTED HEALPix array at the same order:
+If you have a full-sphere NESTED HEALPix array at the same order:
 
 ```python
 values = tiles.values_from_nested(my_nested_map, order=13)
@@ -293,7 +293,7 @@ If the local forwarded viewer port is different, use that local browser URL in
 
 ## Convert Your Own HEALPix Data
 
-Use `tools/make_hpx_tiles.py` when your data is already a full-sky HEALPix
+Use `tools/make_hpx_tiles.py` when your data is already a full-sphere HEALPix
 scalar array. The recommended input format for large custom datasets is a Zarr
 v3 store. Zarr groups can contain multiple variables and leading axes such as
 time; the converter writes one selected variable/time slice to one `hpxmap-v1`
@@ -398,7 +398,7 @@ For a root Zarr array, omit `--array`. For nested group paths, pass paths such
 as `--array fields/temperature`.
 
 Legacy `.npy`, `.npz`, and raw binary inputs still work for smaller workflows.
-RING-ordered input is interpreted as a flat full-sky RING vector:
+RING-ordered input is interpreted as a flat full-sphere RING vector:
 
 ```sh
 npm run convert:hpx -- \
@@ -433,7 +433,7 @@ Use `tools/make_particle_tiles.py` when your source data is a large particle
 table and each particle is already assigned to a HEALPix NESTED cell. This is
 the path for catalogs, tracer particles, or simulation particles where drawing
 the raw points would be too expensive. The converter does not build a dense
-full-sky scalar array. It streams particle chunks, aggregates them into parent
+full-sphere scalar array. It streams particle chunks, aggregates them into parent
 cells for each output order, and writes only non-empty sparse tiles.
 
 Expected Zarr v3 layout:

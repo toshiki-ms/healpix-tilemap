@@ -8,6 +8,8 @@ user must generate or convert local datasets before the map can show data.
 
 ![Earth elevation nside 8192 around Japan](docs/images/earth-elevation-japan-n8192.png)
 
+Earth elevation rendered from an nside 8192 HEALPix tile pyramid.
+
 ## Features
 
 - `hpxmap-v1` directory tile format for HEALPix scalar maps.
@@ -618,8 +620,8 @@ npm run convert:hpx -- \
   --force
 ```
 
-Use `--body-radius-km` only when the particles live on a physical sphere. If it
-is omitted, the viewer's scale bar uses angular units.
+Use `--body-radius-km` only when the scalar field lives on a physical sphere. If
+it is omitted, the viewer's scale bar uses angular units.
 
 Validate and run:
 
@@ -754,6 +756,12 @@ HEALPix cell has multiple particles and each particle carries a noisy
 npm run generate:particle-mixing-demo
 npm run dev
 ```
+
+![Particle mixing split view](docs/images/particle-mixing-split-view.png)
+
+The split view can keep a coarse overview in one pane while inspecting a higher
+order particle aggregate in the other pane. The overview footprint outlines the
+detail pane's current visible region.
 
 The demo uses `base_order=8`, `particle_order=11`, and 16 particles per base
 cell. It starts at order 7 with about 64 particles per displayed cell, then

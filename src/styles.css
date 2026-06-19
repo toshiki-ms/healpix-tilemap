@@ -293,6 +293,11 @@ select {
   max-width: 190px;
 }
 
+.toolbar .selector-field select {
+  min-width: 92px;
+  max-width: 132px;
+}
+
 .toolbar input {
   width: 66px;
   padding: 0 8px;

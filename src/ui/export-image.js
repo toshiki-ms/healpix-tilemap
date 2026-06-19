@@ -278,12 +278,18 @@ function drawToolbar(context, app, width, scale) {
     app.datasetId,
     app.state.view,
     app.state.layerId,
+    selectorLabel(app.state.selectors),
     `order ${app.state.maxOrder}`,
     app.state.colormap,
     app.state.scale,
     `${formatNumber(app.state.min)} .. ${formatNumber(app.state.max)}`
-  ];
+  ].filter(Boolean);
   context.fillText(pieces.join(" / "), x + 14 * scale, y + 50 * scale);
+}
+
+function selectorLabel(selectors = {}) {
+  const parts = Object.entries(selectors).map(([key, value]) => `${key}=${value}`);
+  return parts.length ? parts.join(", ") : null;
 }
 
 function drawInspector(context, app, width, height, scale) {
@@ -457,6 +463,7 @@ function imageMetadata(app, exportOptions) {
     layer: {
       id: app.state.layerId,
       title: layer?.title ?? app.state.layerId,
+      selectors: { ...(app.state.selectors ?? {}) },
       unit: layer?.unit ?? ""
     },
     export: exportOptions,

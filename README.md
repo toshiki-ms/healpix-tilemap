@@ -1,10 +1,11 @@
 # HEALPix Tile Map Viewer
 
-High-resolution web tile map viewer for HEALPix scalar data on spherical surfaces.
+High-resolution web tile map viewer for numeric HEALPix data on spherical
+surfaces.
 
-This repository contains the viewer, tile generators, notebook helpers, and MCP
-server. It does not contain generated tile pyramids or DEM source data. A new
-user must generate or convert local datasets before the map can show data.
+The package provides the browser viewer, dataset generators, notebook helpers,
+and an optional MCP server. Large map datasets are prepared separately: generate
+one of the sample datasets or convert your own data, then start the viewer.
 
 ![Earth elevation nside 8192 around Japan](docs/images/earth-elevation-japan-n8192.png)
 
@@ -12,11 +13,15 @@ Earth elevation rendered from an nside 8192 HEALPix tile pyramid.
 
 ## Features
 
-- `hpxmap-v1` directory tile format for HEALPix scalar maps.
-- 2D unfolded HEALPix net and 3D Three.js globe views.
+- Dataset manifests for HEALPix tile sources, including static tile pyramids
+  and server-side Zarr-backed tile caches.
+- 2D unfolded HEALPix net and 3D Three.js spherical surface views.
 - Zoom-driven LOD selection with parent-tile fallback.
-- Float32, uint16, and int16 scalar tiles.
+- Float32, uint16, and int16 numeric tile layers.
 - Shader-side colormap, min/max, linear/log/symlog scaling, and relief shading.
+- Server-side Zarr tile cache for large 2D slices that should not always be
+  fully materialized as static pyramids.
+- Optional time and level selectors for Zarr-backed layers.
 - Camera/view-state panel with reusable `view_state.json`, copyable
   JSON/URL/Python, globe coordinate axes, graticule, scale bar, PNG/JPG export,
   and headless `hpxviewer-export` rendering.
@@ -36,8 +41,9 @@ src/wasm/             WAT source for the optional tile decoder
 tools/                dataset generators and converters
 python/hpxviewer/     notebook and analysis helpers
 mcp-server/           optional MCP server
-public/datasets/      local generated datasets; ignored by git
-data/                 local source rasters and input arrays; ignored by git
+public/datasets/      dataset index, manifests, and static tile pyramids
+data/                 source rasters, Zarr stores, and other input arrays
+cache/zarr-tiles/     server-side Zarr tile cache
 ```
 
 ## Prerequisites
@@ -51,6 +57,7 @@ data/                 local source rasters and input arrays; ignored by git
 - For procedural spectral noise: `healpy`.
 - For Earth DEM generation: `rasterio` and its GDAL runtime.
 - For converting custom Zarr stores: `zarr>=3`.
+- For MPI cache prefill: an MPI runtime and `mpi4py` in the Python environment.
 - For notebooks: Jupyter and IPython.
 
 Clone the repository:
@@ -72,12 +79,17 @@ If you only want the web viewer and will not generate data on this machine,
 
 ## Dataset Directory
 
-Generated datasets are local artifacts and are ignored by git:
+The viewer discovers datasets through `public/datasets/index.json`. Static tile
+pyramids and manifests are placed under `public/datasets/<dataset-id>/`.
+Source rasters and source Zarr stores are normally kept under `data/`; generated
+server-side Zarr cache tiles are kept under `cache/zarr-tiles/`.
 
 ```text
-public/datasets/<dataset-id>/
 public/datasets/index.json
-data/
+public/datasets/<dataset-id>/manifest.json
+public/datasets/<dataset-id>/layers/<layer-id>/o<order>/f<face>/x<x>/y<y>.bin
+data/<source-data>
+cache/zarr-tiles/<dataset-id>/<layer-id>/<source-and-select-hash>/...
 ```
 
 `public/datasets/index.json` is the dataset selector index. The generator
@@ -161,6 +173,129 @@ bicubic interpolation. Different global DEM rasters can be used by calling
 `tools/make_earth_elevation.py` directly with `--source`. The generated manifest
 sets `body.radiusKm` to Earth's mean radius, so globe scale bars are labeled in
 physical distance.
+
+## Server-Side Zarr Tile Cache
+
+Static tile pyramids are best when the same 2D map will be viewed repeatedly.
+For time-dependent or vertically resolved datasets, writing a complete tile
+pyramid for every 2D slice can be too expensive. A `zarr-tile` layer lets the
+viewer request one horizontal slice tile from a Zarr v3 array. The local
+Node/Vite server generates the `.bin` tile on cache miss and stores it under a
+path keyed by the source configuration and the selected time/level:
+
+```text
+cache/zarr-tiles/<dataset-id>/<layer-id>/<source-and-select-hash>/o<order>/f<face>/x<x>/y<y>.bin
+```
+
+The first request for a tile performs Zarr I/O and downsampling. Later requests
+serve the cached binary tile. Concurrent requests for the same tile are
+deduplicated; different cache misses are handled by a bounded local worker
+queue. Set the worker count with:
+
+```sh
+HPX_ZARR_TILE_WORKERS=8 npm run dev
+```
+
+`zarr-tile` layers require the viewer server's `/api/zarr-tiles` endpoint. Pure
+static file hosting can still serve precomputed directory tile pyramids, but it
+cannot fill missing Zarr-backed cache entries.
+
+For cloud or shared-file-system Zarr stores, prefill the same cache with MPI:
+
+```sh
+pip install -e "python[array,mpi]"
+mpirun -n 32 python3 tools/prefill_zarr_tile_cache.py \
+  --manifest public/datasets/my-zarr-cache/manifest.json \
+  --layer-id temperature \
+  --select time=0 \
+  --select level=12 \
+  --min-order 11 \
+  --max-order 13
+```
+
+Each rank receives a disjoint subset of HEALPix tiles and writes the same cache
+files used by the viewer. This is the preferred path for heavy batches: MPI
+parallelism exercises independent Zarr chunk reads, while the web server remains
+a lightweight cache reader for interactive use.
+
+The current server-side Zarr reader supports horizontal 2D slices stored as a
+face-local Zarr array. It does not render volumetric 3D data directly; level or
+sigma axes are selected slice-by-slice:
+
+```text
+(time, level, face, y, x)
+```
+
+`face` has length 12, and `y`/`x` are the native face grid at
+`nside = 2**maxOrder`. Extra axes such as `time`, `level`, or `sigma` are fixed
+by `source.select` by default. To let users switch slices in the browser, expose
+those axes with `source.selectors`. Chunk the array so tile requests can read
+compact rectangles, for example `(1, 1, 1, 256, 256)` for nside 8192 data.
+
+Minimal `zarr-tile` layer manifest:
+
+```json
+{
+  "id": "temperature",
+  "title": "Temperature",
+  "kind": "scalar",
+  "dtype": "float32",
+  "source": {
+    "type": "zarr-tile",
+    "endpoint": "/api/zarr-tiles",
+    "zarr": "data/my-atmosphere.zarr",
+    "array": "temperature",
+    "dims": ["time", "level", "face", "y", "x"],
+    "select": { "time": 0, "level": 12 },
+    "selectors": {
+      "time": {
+        "label": "Time",
+        "values": [
+          { "value": 0, "label": "t=0" },
+          { "value": 1, "label": "t=1" }
+        ],
+        "default": 0
+      },
+      "level": {
+        "label": "Level",
+        "values": [
+          { "value": 0, "label": "surface" },
+          { "value": 12, "label": "level 12" }
+        ],
+        "default": 12
+      }
+    },
+    "maxReadCells": 4194304
+  }
+}
+```
+
+The viewer writes selected slices into the URL as `time=...&level=...`. In split
+mode the right/bottom pane uses `rightTime=...&rightLevel=...`, so the two panes
+can compare different slices of the same variable.
+
+Generate a small local demo that uses Zarr-backed cache filling rather than
+prewritten tiles:
+
+```sh
+npm run generate:zarr-tile-demo
+npm run dev
+```
+
+Open `zarr-tile-demo` in the dataset menu. To warm its cache with MPI:
+
+```sh
+mpirun -n 4 python3 tools/prefill_zarr_tile_cache.py \
+  --manifest public/datasets/zarr-tile-demo/manifest.json \
+  --layer-id value \
+  --select time=0 \
+  --select level=0
+```
+
+The offline converter still supports the preferred `(..., block, cell)` layout
+for static pyramids. For server-side cache filling, prefer `(..., face, y, x)`
+because the server can map one requested HEALPix tile to a small rectangular
+Zarr read.
 
 ## Run The Viewer
 
@@ -486,11 +621,11 @@ If the local forwarded viewer port is different, use that local browser URL in
 
 ## Convert Your Own HEALPix Data
 
-Use `tools/make_hpx_tiles.py` when your data is already a full-sphere HEALPix
-scalar array. The recommended input format for large custom datasets is a Zarr
-v3 store. Zarr groups can contain multiple variables and leading axes such as
-time; the converter writes one selected variable/time slice to one `hpxmap-v1`
-tile pyramid.
+Use `tools/make_hpx_tiles.py` when your data is already a dense HEALPix field
+covering the sphere. The recommended input format for large custom datasets is a
+Zarr v3 store. Zarr groups can contain multiple variables and leading axes such
+as time; the converter writes one selected variable/time slice to one static
+tile pyramid and dataset manifest.
 
 Preferred selected array layouts:
 
@@ -620,8 +755,8 @@ npm run convert:hpx -- \
   --force
 ```
 
-Use `--body-radius-km` only when the scalar field lives on a physical sphere. If
-it is omitted, the viewer's scale bar uses angular units.
+Use `--body-radius-km` only when the data layer lives on a physical sphere. If it
+is omitted, the viewer's scale bar uses angular units.
 
 Validate and run:
 
@@ -636,8 +771,8 @@ Use `tools/make_particle_tiles.py` when your source data is a large particle
 table and each particle is already assigned to a HEALPix NESTED cell. This is
 the path for catalogs, tracer particles, or simulation particles where drawing
 the raw points would be too expensive. The converter does not build a dense
-full-sphere scalar array. It streams particle chunks, aggregates them into parent
-cells for each output order, and writes only non-empty sparse tiles.
+full-sphere intermediate field. It streams particle chunks, aggregates them into
+parent cells for each output order, and writes only non-empty sparse tiles.
 
 Expected Zarr v3 layout:
 

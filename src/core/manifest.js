@@ -46,14 +46,67 @@ export function validateManifest(manifest) {
     }
   }
   for (const layer of manifest.layers) {
-    if (!layer.id || !layer.source?.template) {
-      throw new Error("Each layer must define id and source.template.");
+    if (!layer.id || !layer.source || typeof layer.source !== "object") {
+      throw new Error("Each layer must define id and source.");
     }
+    validateLayerSource(layer);
     if (!supportedDtype(layer.dtype)) {
       throw new Error(`Unsupported layer dtype: ${layer.dtype}`);
     }
     if ((layer.dtype === "uint16" || layer.dtype === "int16") && !layer.quantization) {
       throw new Error(`Layer ${layer.id} must define quantization for dtype ${layer.dtype}.`);
+    }
+  }
+}
+
+function validateLayerSource(layer) {
+  if (layer.source.type === "zarr-tile") {
+    if (!layer.source.zarr || typeof layer.source.zarr !== "string") {
+      throw new Error(`Layer ${layer.id} zarr-tile source must define zarr.`);
+    }
+    if (layer.source.array !== undefined && typeof layer.source.array !== "string") {
+      throw new Error(`Layer ${layer.id} zarr-tile source array must be a string.`);
+    }
+    if (layer.source.dims !== undefined) {
+      if (!Array.isArray(layer.source.dims) || layer.source.dims.some((name) => typeof name !== "string")) {
+        throw new Error(`Layer ${layer.id} zarr-tile source dims must be an array of strings.`);
+      }
+    }
+    if (
+      layer.source.select !== undefined &&
+      (!layer.source.select || typeof layer.source.select !== "object" || Array.isArray(layer.source.select))
+    ) {
+      throw new Error(`Layer ${layer.id} zarr-tile source select must be an object.`);
+    }
+    if (layer.source.selectors !== undefined) {
+      validateSourceSelectors(layer);
+    }
+    return;
+  }
+  if (!layer.source.template || typeof layer.source.template !== "string") {
+    throw new Error("Each directory layer source must define source.template.");
+  }
+}
+
+function validateSourceSelectors(layer) {
+  const selectors = layer.source.selectors;
+  if (!selectors || typeof selectors !== "object" || Array.isArray(selectors)) {
+    throw new Error(`Layer ${layer.id} zarr-tile source selectors must be an object.`);
+  }
+  for (const [id, spec] of Object.entries(selectors)) {
+    if (!id) {
+      throw new Error(`Layer ${layer.id} zarr-tile selector id cannot be empty.`);
+    }
+    const values = Array.isArray(spec) ? spec : spec?.values;
+    if (!Array.isArray(values) || values.length === 0) {
+      throw new Error(`Layer ${layer.id} zarr-tile selector ${id} must define values.`);
+    }
+    for (const value of values) {
+      if (value && typeof value === "object") {
+        if (value.value === undefined && value.id === undefined) {
+          throw new Error(`Layer ${layer.id} zarr-tile selector ${id} value object must define value or id.`);
+        }
+      }
     }
   }
 }

@@ -6,6 +6,7 @@ node_modules/
 # Local/generated data. Published repositories must not include tile pyramids,
 # DEM downloads, or notebook scratch files.
 /data/
+/cache/
 public/datasets/*
 !public/datasets/.gitkeep
 !public/datasets/README.md

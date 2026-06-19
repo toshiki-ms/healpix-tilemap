@@ -4,6 +4,12 @@ import { mortonDecode, mortonEncode } from "../src/core/morton.js";
 import { faceUvToVector, healpixVectorToDisplayVector } from "../src/core/projection.js";
 import { tileBounds, tileFromCell, tileGridSize } from "../src/core/tile-address.js";
 import { validateManifest } from "../src/core/manifest.js";
+import {
+  defaultSelectorsForLayer,
+  parseLayerRequestId,
+  selectorSpecsForLayer,
+  tileLayerId
+} from "../src/data/layer-request.js";
 import { bytesPerSample, decodeSample, valueEncoding } from "../src/data/tile-codec.js";
 import { detailOrderForBasePixels, LOD_TARGET_TILE_PIXELS } from "../src/render/lod.js";
 
@@ -61,6 +67,48 @@ validateManifest({
   tileSize: 256,
   body: { name: "Earth", radiusKm: 6371.0088 },
   layers: [quantizedLayer]
+});
+const zarrManifest = {
+  schema: "hpxmap-v1",
+  ordering: "nested",
+  maxOrder: 9,
+  nside: 512,
+  tileShift: 7,
+  tileSize: 128,
+  layers: [{
+    id: "value",
+    dtype: "float32",
+    source: {
+      type: "zarr-tile",
+      endpoint: "/api/zarr-tiles",
+      zarr: "data/zarr-tile-demo.zarr",
+      array: "value",
+      dims: ["time", "level", "face", "y", "x"],
+      select: { time: 0, level: 0 },
+      selectors: {
+        time: { label: "Time", values: [0, 1], default: 0 },
+        level: {
+          label: "Level",
+          values: [
+            { value: 0, label: "surface" },
+            { value: 1, label: "aloft" }
+          ],
+          default: 0
+        }
+      }
+    }
+  }]
+};
+validateManifest(zarrManifest);
+assert.deepEqual(defaultSelectorsForLayer(zarrManifest, "value"), { time: "0", level: "0" });
+assert.equal(selectorSpecsForLayer(zarrManifest, "value").length, 2);
+assert.equal(
+  tileLayerId({ layerId: "value", selectors: { time: 1, level: 1 } }, zarrManifest),
+  "value?time=1&level=1"
+);
+assert.deepEqual(parseLayerRequestId("value?time=1&level=1"), {
+  layerId: "value",
+  selectors: { time: "1", level: "1" }
 });
 assert.throws(() => validateManifest({
   schema: "hpxmap-v1",

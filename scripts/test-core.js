@@ -62,6 +62,26 @@ validateManifest({
   body: { name: "Earth", radiusKm: 6371.0088 },
   layers: [quantizedLayer]
 });
+validateManifest({
+  schema: "hpxmap-v1",
+  ordering: "nested",
+  maxOrder: 9,
+  nside: 512,
+  tileShift: 7,
+  tileSize: 128,
+  layers: [{
+    id: "value",
+    dtype: "float32",
+    source: {
+      type: "zarr-tile",
+      endpoint: "/api/zarr-tiles",
+      zarr: "data/zarr-tile-demo.zarr",
+      array: "value",
+      dims: ["time", "level", "face", "y", "x"],
+      select: { time: 0, level: 0 }
+    }
+  }]
+});
 assert.throws(() => validateManifest({
   schema: "hpxmap-v1",
   ordering: "nested",

@@ -15,6 +15,7 @@ notebook = ["ipython"]
 array = ["numpy", "zarr>=3"]
 analysis = ["numpy", "pandas"]
 generators = ["numpy", "zarr>=3", "healpy", "rasterio"]
+mpi = ["mpi4py"]
 all = ["ipython", "numpy", "zarr>=3", "pandas", "healpy", "rasterio"]
 
 [project.scripts]

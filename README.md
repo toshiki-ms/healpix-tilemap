@@ -17,6 +17,8 @@ Earth elevation rendered from an nside 8192 HEALPix tile pyramid.
 - Zoom-driven LOD selection with parent-tile fallback.
 - Float32, uint16, and int16 scalar tiles.
 - Shader-side colormap, min/max, linear/log/symlog scaling, and relief shading.
+- Server-side Zarr tile cache for large 2D slices that should not always be
+  fully materialized as static pyramids.
 - Camera/view-state panel with reusable `view_state.json`, copyable
   JSON/URL/Python, globe coordinate axes, graticule, scale bar, PNG/JPG export,
   and headless `hpxviewer-export` rendering.
@@ -38,6 +40,7 @@ python/hpxviewer/     notebook and analysis helpers
 mcp-server/           optional MCP server
 public/datasets/      local generated datasets; ignored by git
 data/                 local source rasters and input arrays; ignored by git
+cache/zarr-tiles/     server-side Zarr tile cache; ignored by git
 ```
 
 ## Prerequisites
@@ -51,6 +54,7 @@ data/                 local source rasters and input arrays; ignored by git
 - For procedural spectral noise: `healpy`.
 - For Earth DEM generation: `rasterio` and its GDAL runtime.
 - For converting custom Zarr stores: `zarr>=3`.
+- For MPI cache prefill: an MPI runtime and `mpi4py` in the Python environment.
 - For notebooks: Jupyter and IPython.
 
 Clone the repository:
@@ -161,6 +165,100 @@ bicubic interpolation. Different global DEM rasters can be used by calling
 `tools/make_earth_elevation.py` directly with `--source`. The generated manifest
 sets `body.radiusKm` to Earth's mean radius, so globe scale bars are labeled in
 physical distance.
+
+## Server-Side Zarr Tile Cache
+
+Static tile pyramids are best when the same 2D map will be viewed repeatedly.
+For future 3D workflows with many times or vertical levels, writing a complete
+tile pyramid for every slice can be too expensive. A `zarr-tile` layer lets
+the viewer request one tile from a Zarr v3 array. The local Node/Vite server
+generates the `.bin` tile on cache miss and stores it under:
+
+```text
+cache/zarr-tiles/<dataset-id>/<layer-id>/<source-hash>/o<order>/f<face>/x<x>/y<y>.bin
+```
+
+The first request for a tile performs Zarr I/O and downsampling. Later requests
+serve the cached binary tile. Concurrent requests for the same tile are
+deduplicated; different cache misses are handled by a bounded local worker
+queue. Set the worker count with:
+
+```sh
+HPX_ZARR_TILE_WORKERS=8 npm run dev
+```
+
+`zarr-tile` layers require the viewer server's `/api/zarr-tiles` endpoint. Pure
+static file hosting can still serve precomputed directory tile pyramids, but it
+cannot fill missing Zarr-backed cache entries.
+
+For cloud or shared-file-system Zarr stores, prefill the same cache with MPI:
+
+```sh
+pip install -e "python[array,mpi]"
+mpirun -n 32 python3 tools/prefill_zarr_tile_cache.py \
+  --manifest public/datasets/my-zarr-cache/manifest.json \
+  --layer-id temperature \
+  --min-order 11 \
+  --max-order 13
+```
+
+Each rank receives a disjoint subset of HEALPix tiles and writes the same cache
+files used by the viewer. This is the preferred path for heavy batches: MPI
+parallelism exercises independent Zarr chunk reads, while the web server remains
+a lightweight cache reader for interactive use.
+
+The current server-side Zarr reader supports 2D horizontal slices stored as a
+face-local Zarr array:
+
+```text
+(time, level, face, y, x)
+```
+
+`face` has length 12, and `y`/`x` are the native face grid at
+`nside = 2**maxOrder`. Extra axes such as `time`, `level`, or `sigma` are fixed
+by `source.select` in the manifest. Chunk the array so tile requests can read
+compact rectangles, for example `(1, 1, 1, 256, 256)` for nside 8192 data.
+
+Minimal `zarr-tile` layer manifest:
+
+```json
+{
+  "id": "temperature",
+  "title": "Temperature",
+  "kind": "scalar",
+  "dtype": "float32",
+  "source": {
+    "type": "zarr-tile",
+    "endpoint": "/api/zarr-tiles",
+    "zarr": "data/my-atmosphere.zarr",
+    "array": "temperature",
+    "dims": ["time", "level", "face", "y", "x"],
+    "select": { "time": 0, "level": 12 },
+    "maxReadCells": 4194304
+  }
+}
+```
+
+Generate a small local demo that uses Zarr-backed cache filling rather than
+prewritten tiles:
+
+```sh
+npm run generate:zarr-tile-demo
+npm run dev
+```
+
+Open `zarr-tile-demo` in the dataset menu. To warm its cache with MPI:
+
+```sh
+mpirun -n 4 python3 tools/prefill_zarr_tile_cache.py \
+  --manifest public/datasets/zarr-tile-demo/manifest.json \
+  --layer-id value
+```
+
+The offline converter still supports the preferred `(..., block, cell)` layout
+for static pyramids. For server-side cache filling, prefer `(..., face, y, x)`
+because the server can map one requested HEALPix tile to a small rectangular
+Zarr read.
 
 ## Run The Viewer
 

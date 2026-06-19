@@ -80,6 +80,7 @@ def main() -> None:
                 output=output,
                 select=selectors,
                 force=args.force,
+                manifest=manifest,
             )
             local_done += 1
         except Exception as error:  # noqa: BLE001 - keep MPI jobs alive long enough to report all failures.

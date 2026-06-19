@@ -122,18 +122,24 @@ def main() -> None:
                 title="Scalar value",
                 source_zarr=str(args.output),
                 summary=summaries["value"],
+                time_count=args.time_count,
+                level_count=args.level_count,
             ),
             make_layer(
                 layer_id="u",
                 title="U component",
                 source_zarr=str(args.output),
                 summary=summaries["u"],
+                time_count=args.time_count,
+                level_count=args.level_count,
             ),
             make_layer(
                 layer_id="v",
                 title="V component",
                 source_zarr=str(args.output),
                 summary=summaries["v"],
+                time_count=args.time_count,
+                level_count=args.level_count,
             ),
         ],
         "sources": [
@@ -154,7 +160,15 @@ def main() -> None:
     print(f"wrote {args.dataset_output / 'manifest.json'}")
 
 
-def make_layer(*, layer_id: str, title: str, source_zarr: str, summary: dict[str, object]) -> dict[str, object]:
+def make_layer(
+    *,
+    layer_id: str,
+    title: str,
+    source_zarr: str,
+    summary: dict[str, object],
+    time_count: int,
+    level_count: int,
+) -> dict[str, object]:
     sample = np.concatenate(summary["samples"])
     p1, p50, p99 = np.percentile(sample, [1, 50, 99])
     return {
@@ -171,6 +185,18 @@ def make_layer(*, layer_id: str, title: str, source_zarr: str, summary: dict[str
             "array": layer_id,
             "dims": ["time", "level", "face", "y", "x"],
             "select": {"time": 0, "level": 0},
+            "selectors": {
+                "time": {
+                    "label": "Time",
+                    "values": [{"value": index, "label": f"t={index}"} for index in range(time_count)],
+                    "default": 0,
+                },
+                "level": {
+                    "label": "Level",
+                    "values": [{"value": index, "label": f"level {index}"} for index in range(level_count)],
+                    "default": 0,
+                },
+            },
             "cacheKey": "spherical-vector-components-v1",
             "maxReadCells": 4194304,
         },

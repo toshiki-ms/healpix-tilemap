@@ -30,7 +30,12 @@ def zarr_tile_layer(manifest: dict[str, Any], layer_id: str) -> dict[str, Any]:
     raise SystemExit(f"Layer {layer_id!r} was not found in manifest.")
 
 
-def zarr_tile_cache_descriptor(manifest: dict[str, Any], layer: dict[str, Any]) -> dict[str, Any]:
+def zarr_tile_cache_descriptor(
+    manifest: dict[str, Any],
+    layer: dict[str, Any],
+    *,
+    select: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     return {
         "schema": ZARR_TILE_CACHE_SCHEMA,
         "dataset": manifest.get("name"),
@@ -41,13 +46,19 @@ def zarr_tile_cache_descriptor(manifest: dict[str, Any], layer: dict[str, Any]) 
         "manifestTileSize": manifest.get("tileSize"),
         "dtype": layer.get("dtype"),
         "quantization": layer.get("quantization"),
+        "select": effective_select(layer.get("source", {}), select),
         "source": layer.get("source"),
     }
 
 
-def zarr_tile_cache_hash(manifest: dict[str, Any], layer: dict[str, Any]) -> str:
+def zarr_tile_cache_hash(
+    manifest: dict[str, Any],
+    layer: dict[str, Any],
+    *,
+    select: dict[str, Any] | None = None,
+) -> str:
     payload = json.dumps(
-        zarr_tile_cache_descriptor(manifest, layer),
+        zarr_tile_cache_descriptor(manifest, layer, select=select),
         sort_keys=True,
         separators=(",", ":"),
         ensure_ascii=False,
@@ -63,6 +74,7 @@ def zarr_tile_cache_path(
     face: int,
     x: int,
     y: int,
+    select: dict[str, Any] | None = None,
     cache_root: Path | None = None,
 ) -> Path:
     source = layer.get("source", {})
@@ -71,7 +83,7 @@ def zarr_tile_cache_path(
         root
         / safe_path_segment(str(manifest.get("name") or "dataset"))
         / safe_path_segment(str(layer.get("id") or "layer"))
-        / zarr_tile_cache_hash(manifest, layer)
+        / zarr_tile_cache_hash(manifest, layer, select=select)
         / f"o{order}"
         / f"f{face}"
         / f"x{x}"
@@ -92,6 +104,7 @@ def generate_zarr_tile(
     x: int,
     y: int,
     output: Path,
+    select: dict[str, Any] | None = None,
     force: bool = False,
 ) -> Path:
     if output.exists() and not force:
@@ -100,7 +113,7 @@ def generate_zarr_tile(
     layer = zarr_tile_layer(manifest, layer_id)
     validate_tile_address(manifest, order, face, x, y)
 
-    tile = read_zarr_tile(manifest_path, manifest, layer, order=order, face=face, x=x, y=y)
+    tile = read_zarr_tile(manifest_path, manifest, layer, order=order, face=face, x=x, y=y, select=select)
     encoded = encode_tile(tile, layer)
     output.parent.mkdir(parents=True, exist_ok=True)
     tmp = output.with_name(f".{output.name}.{os.getpid()}.tmp")
@@ -133,11 +146,12 @@ def read_zarr_tile(
     face: int,
     x: int,
     y: int,
+    select: dict[str, Any] | None = None,
 ) -> np.ndarray:
     source = layer["source"]
     array = open_zarr_array(resolve_zarr_location(manifest_path, str(source["zarr"])), source.get("array"))
     dims = source_dimension_names(array, source)
-    return read_face_grid_tile(array, dims, source, manifest, order=order, face=face, x=x, y=y)
+    return read_face_grid_tile(array, dims, source, manifest, order=order, face=face, x=x, y=y, select=select)
 
 
 def resolve_zarr_location(manifest_path: Path, location: str) -> str | Path:
@@ -217,6 +231,7 @@ def read_face_grid_tile(
     face: int,
     x: int,
     y: int,
+    select: dict[str, Any] | None = None,
 ) -> np.ndarray:
     shape = tuple(int(item) for item in getattr(array, "shape"))
     face_axis, y_axis, x_axis = face_grid_axes(shape, dims)
@@ -240,7 +255,7 @@ def read_face_grid_tile(
     x0 = x * tile_size * factor
     y0 = y * tile_size * factor
     indexer: list[int | slice] = []
-    select = dict(source.get("select") or {})
+    axis_select = effective_select(source, select)
     for axis, size in enumerate(shape):
         if axis == face_axis:
             indexer.append(face)
@@ -249,7 +264,7 @@ def read_face_grid_tile(
         elif axis == x_axis:
             indexer.append(slice(x0, x0 + read_size))
         else:
-            indexer.append(selected_axis_index(axis, size, dims, select))
+            indexer.append(selected_axis_index(axis, size, dims, axis_select))
 
     data = np.asarray(array[tuple(indexer)], dtype=np.float32)
     remaining = [axis for axis, value in enumerate(indexer) if isinstance(value, slice)]
@@ -263,6 +278,13 @@ def read_face_grid_tile(
         return np.asarray(data, dtype=np.float32)
     coarse = data.reshape(tile_size, factor, tile_size, factor)
     return np.nanmean(coarse, axis=(1, 3), dtype=np.float64).astype(np.float32)
+
+
+def effective_select(source: dict[str, Any], select: dict[str, Any] | None = None) -> dict[str, Any]:
+    merged = dict(source.get("select") or {})
+    if select:
+        merged.update({str(key): value for key, value in select.items()})
+    return merged
 
 
 def face_grid_axes(shape: tuple[int, ...], dims: list[str] | None) -> tuple[int, int, int]:

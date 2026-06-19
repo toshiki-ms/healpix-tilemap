@@ -1,4 +1,5 @@
 import { tileKey } from "../core/tile-address.js";
+import { baseLayerId, parseLayerRequestId } from "./layer-request.js";
 import { arrayForDtype, bytesPerSample, valueEncoding } from "./tile-codec.js";
 
 export class DirectoryTileSource {
@@ -9,7 +10,7 @@ export class DirectoryTileSource {
   }
 
   layer(id) {
-    const layer = this.manifest.layers.find((item) => item.id === id);
+    const layer = this.manifest.layers.find((item) => item.id === baseLayerId(id));
     if (!layer) {
       throw new Error(`Unknown layer: ${id}`);
     }
@@ -20,7 +21,8 @@ export class DirectoryTileSource {
     const layer = this.layer(layerId);
     const source = layer.source ?? {};
     if (source.type === "zarr-tile") {
-      return this.zarrTileUrl(layerId, tile, source);
+      const request = parseLayerRequestId(layerId);
+      return this.zarrTileUrl(request.layerId, tile, source, request.selectors);
     }
     const template = source.template;
     const path = template
@@ -31,7 +33,7 @@ export class DirectoryTileSource {
     return new URL(path, this.baseUrl).href;
   }
 
-  zarrTileUrl(layerId, tile, source) {
+  zarrTileUrl(layerId, tile, source, selectors = {}) {
     const endpoint = source.endpoint ?? "/api/zarr-tiles";
     const url = new URL(endpoint, this.manifestUrl);
     url.searchParams.set("dataset", this.manifest.name);
@@ -40,6 +42,9 @@ export class DirectoryTileSource {
     url.searchParams.set("face", String(tile.face));
     url.searchParams.set("x", String(tile.x));
     url.searchParams.set("y", String(tile.y));
+    for (const [key, value] of Object.entries(selectors)) {
+      url.searchParams.set(key, String(value));
+    }
     return url.href;
   }
 

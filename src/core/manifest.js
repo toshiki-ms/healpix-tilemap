@@ -78,9 +78,35 @@ function validateLayerSource(layer) {
     ) {
       throw new Error(`Layer ${layer.id} zarr-tile source select must be an object.`);
     }
+    if (layer.source.selectors !== undefined) {
+      validateSourceSelectors(layer);
+    }
     return;
   }
   if (!layer.source.template || typeof layer.source.template !== "string") {
     throw new Error("Each directory layer source must define source.template.");
+  }
+}
+
+function validateSourceSelectors(layer) {
+  const selectors = layer.source.selectors;
+  if (!selectors || typeof selectors !== "object" || Array.isArray(selectors)) {
+    throw new Error(`Layer ${layer.id} zarr-tile source selectors must be an object.`);
+  }
+  for (const [id, spec] of Object.entries(selectors)) {
+    if (!id) {
+      throw new Error(`Layer ${layer.id} zarr-tile selector id cannot be empty.`);
+    }
+    const values = Array.isArray(spec) ? spec : spec?.values;
+    if (!Array.isArray(values) || values.length === 0) {
+      throw new Error(`Layer ${layer.id} zarr-tile selector ${id} must define values.`);
+    }
+    for (const value of values) {
+      if (value && typeof value === "object") {
+        if (value.value === undefined && value.id === undefined) {
+          throw new Error(`Layer ${layer.id} zarr-tile selector ${id} value object must define value or id.`);
+        }
+      }
+    }
   }
 }

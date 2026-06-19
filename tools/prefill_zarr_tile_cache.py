@@ -3,11 +3,11 @@
 
 Run with one process:
 
-    python3 tools/prefill_zarr_tile_cache.py --manifest public/datasets/foo/manifest.json --layer-id value
+    python3 tools/prefill_zarr_tile_cache.py --manifest public/datasets/foo/manifest.json --layer-id value --select time=0
 
 Run on an MPI-capable machine:
 
-    mpirun -n 32 python3 tools/prefill_zarr_tile_cache.py --manifest public/datasets/foo/manifest.json --layer-id value
+    mpirun -n 32 python3 tools/prefill_zarr_tile_cache.py --manifest public/datasets/foo/manifest.json --layer-id value --select time=0
 """
 
 from __future__ import annotations
@@ -28,6 +28,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--min-order", type=int, default=None)
     parser.add_argument("--max-order", type=int, default=None)
     parser.add_argument("--order", type=int, action="append", default=[], help="Generate one order. Repeatable.")
+    parser.add_argument("--select", action="append", default=[], help="Select one non-spatial axis, e.g. time=0.")
     parser.add_argument("--cache-root", type=Path, default=None)
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--progress-interval", type=int, default=250)
@@ -39,6 +40,7 @@ def main() -> None:
     mpi = mpi_context()
     manifest = load_manifest(args.manifest)
     layer = zarr_tile_layer(manifest, args.layer_id)
+    selectors = parse_selectors(args.select)
     orders = selected_orders(manifest, args)
     tiles = list(iter_tiles(orders, int(manifest["tileShift"])))
     started = time.time()
@@ -61,6 +63,7 @@ def main() -> None:
             face=face,
             x=x,
             y=y,
+            select=selectors,
             cache_root=args.cache_root,
         )
         if output.exists() and not args.force:
@@ -75,6 +78,7 @@ def main() -> None:
                 x=x,
                 y=y,
                 output=output,
+                select=selectors,
                 force=args.force,
             )
             local_done += 1
@@ -138,6 +142,22 @@ def iter_tiles(orders: list[int], tile_shift: int) -> Iterator[tuple[int, int, i
             for y in range(grid):
                 for x in range(grid):
                     yield order, face, x, y
+
+
+def parse_selectors(items: list[str]) -> dict[str, int]:
+    selectors: dict[str, int] = {}
+    for item in items:
+        if "=" not in item:
+            raise SystemExit(f"--select must be formatted as dim=index, got {item!r}")
+        dim, value = item.split("=", 1)
+        dim = dim.strip()
+        if not dim:
+            raise SystemExit("--select dimension name cannot be empty")
+        try:
+            selectors[dim] = int(value)
+        except ValueError as exc:
+            raise SystemExit(f"--select value for {dim!r} must be an integer, got {value!r}") from exc
+    return selectors
 
 
 class MpiContext:

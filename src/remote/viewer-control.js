@@ -1,6 +1,7 @@
 import { cellToNestedId } from "../core/healpix-nested.js";
 import { faceUvToVector, lonLatToVector, vectorToLonLat } from "../core/projection.js";
 import { cellFromFaceUv, tileFromCell, tileKey } from "../core/tile-address.js";
+import { tileLayerId } from "../data/layer-request.js";
 import { sampleTileValue } from "../render/tile-visual.js";
 
 const REMOTE_PARAM_NAMES = new Set(["remote", "debug"]);
@@ -90,7 +91,10 @@ async function inspectLonLat(app, options) {
   }
   const faceUv = faceUvForLonLat(lon, lat);
   const order = clampOrder(Number(options.order ?? app.state.maxOrder), app.manifest);
-  const layerId = String(options.layerId ?? options.layer ?? app.state.layerId);
+  const requestedLayerId = options.layerId ?? options.layer;
+  const layerId = requestedLayerId !== undefined
+    ? String(requestedLayerId)
+    : tileLayerId(app.state, app.manifest);
   const cell = cellFromFaceUv(order, faceUv.face, faceUv.u, faceUv.v);
   const targetTile = tileFromCell(cell, app.manifest.tileShift);
   let resolved = app.scheduler.resolve(layerId, targetTile);

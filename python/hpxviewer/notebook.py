@@ -32,6 +32,8 @@ class Viewer:
         layer: str | None = None,
         view: str | None = None,
         order: int | None = None,
+        time: int | str | None = None,
+        level: int | str | None = None,
         cmap: str | None = None,
         scale: str | None = None,
         min: float | None = None,
@@ -50,6 +52,8 @@ class Viewer:
             layer=layer,
             view=view,
             order=order,
+            time=time,
+            level=level,
             cmap=cmap,
             scale=scale,
             min=min,
@@ -421,11 +425,19 @@ def _pane_state_from_params(
     min_value = params.get(key("Min")) if prefix else params.get("min")
     max_value = params.get(key("Max")) if prefix else params.get("max")
     camera = params.get(key("Camera")) if prefix else params.get("camera")
+    time_value = params.get(key("Time")) if prefix else params.get("time")
+    level_value = params.get(key("Level")) if prefix else params.get("level")
+    selectors = dict(fallback.get("selectors", {})) if isinstance(fallback.get("selectors"), Mapping) else {}
+    if time_value is not None:
+        selectors["time"] = str(time_value)
+    if level_value is not None:
+        selectors["level"] = str(level_value)
     pane_id = "right" if prefix else "left"
     state: dict[str, Any] = {
         "paneId": pane_id,
         "datasetId": str(dataset or fallback.get("datasetId") or fallback.get("dataset") or ""),
         "layerId": str(layer or fallback.get("layerId") or fallback.get("layer") or ""),
+        "selectors": selectors,
         "view": str(view or fallback.get("view") or "net"),
         "order": _int_or(order, _int_or(fallback.get("order"), 0)),
         "colormap": str(cmap or fallback.get("colormap") or fallback.get("cmap") or "viridis"),
@@ -489,6 +501,7 @@ def _params_from_view_state(state: Mapping[str, Any]) -> dict[str, object]:
     _copy_if_present(params, "min", base.get("min"))
     _copy_if_present(params, "max", base.get("max"))
     _copy_if_present(params, "camera", base.get("camera"))
+    _copy_selector_params(params, base, "")
     if split != "single":
         params.update(
             {
@@ -503,6 +516,7 @@ def _params_from_view_state(state: Mapping[str, Any]) -> dict[str, object]:
         _copy_if_present(params, "rightMin", right.get("min"))
         _copy_if_present(params, "rightMax", right.get("max"))
         _copy_if_present(params, "rightCamera", right.get("camera"))
+        _copy_selector_params(params, right, "right")
     export_state = state.get("export")
     if isinstance(export_state, Mapping):
         _copy_if_present(params, "exportMode", export_state.get("mode"))
@@ -525,10 +539,19 @@ def _pane_from_view_state(
     if not isinstance(source, Mapping):
         source = state if pane_id == str(state.get("paneId", "left")) or pane_id == "left" else {}
     fallback = fallback or {}
+    selectors = source.get("selectors")
+    if not isinstance(selectors, Mapping):
+        selectors = fallback.get("selectors") if isinstance(fallback.get("selectors"), Mapping) else {}
+    selectors = {str(key): str(value) for key, value in dict(selectors).items()}
+    if source.get("time") is not None:
+        selectors["time"] = str(source.get("time"))
+    if source.get("level") is not None:
+        selectors["level"] = str(source.get("level"))
     return {
         "paneId": pane_id,
         "datasetId": str(source.get("datasetId", source.get("dataset", fallback.get("datasetId", "")))),
         "layerId": str(source.get("layerId", source.get("layer", fallback.get("layerId", "")))),
+        "selectors": selectors,
         "view": str(source.get("view", fallback.get("view", "net"))),
         "order": _int_or(source.get("order", source.get("maxOrder")), _int_or(fallback.get("order"), 0)),
         "colormap": str(source.get("colormap", source.get("cmap", fallback.get("colormap", "viridis")))),
@@ -557,6 +580,17 @@ def _prefixed_key(prefix: str):
 def _copy_if_present(params: dict[str, object], key: str, value: Any) -> None:
     if value is not None and value != "":
         params[key] = value
+
+
+def _copy_selector_params(params: dict[str, object], state: Mapping[str, Any], prefix: str) -> None:
+    selectors = state.get("selectors")
+    if not isinstance(selectors, Mapping):
+        return
+    for name in ("time", "level"):
+        value = selectors.get(name)
+        if value is None or value == "":
+            continue
+        params[f"{prefix}{name[:1].upper()}{name[1:]}" if prefix else name] = value
 
 
 def _bool_param(value: object, fallback: bool = False) -> bool:

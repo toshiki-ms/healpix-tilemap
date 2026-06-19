@@ -123,6 +123,7 @@ class ZarrTileService {
       sendJsonError(response, 400, `Layer ${requestTile.layer} is not a zarr-tile layer.`);
       return;
     }
+    requestTile.select = validateZarrTileSelect(layer, requestTile.select);
     validateZarrTileAddress(manifest, requestTile);
     const cachePath = zarrTileCachePath(this.root, manifest, layer, requestTile);
     if (!(await fileExists(cachePath))) {
@@ -216,6 +217,9 @@ class ZarrTileService {
         "--output",
         cachePath
       ];
+      for (const [key, value] of Object.entries(tile.select ?? {})) {
+        args.push("--select", `${key}=${value}`);
+      }
       const child = spawn(python, args, { cwd: this.root, env: process.env });
       let stdout = "";
       let stderr = "";
@@ -238,13 +242,21 @@ class ZarrTileService {
 }
 
 function parseZarrTileRequest(url) {
+  const reserved = new Set(["dataset", "layer", "order", "face", "x", "y"]);
+  const select = {};
+  for (const [key, value] of url.searchParams.entries()) {
+    if (!reserved.has(key)) {
+      select[key] = value;
+    }
+  }
   return {
     dataset: requiredParam(url, "dataset"),
     layer: requiredParam(url, "layer"),
     order: intParam(url, "order"),
     face: intParam(url, "face"),
     x: intParam(url, "x"),
-    y: intParam(url, "y")
+    y: intParam(url, "y"),
+    select
   };
 }
 
@@ -284,6 +296,26 @@ function validateZarrTileAddress(manifest, tile) {
   }
 }
 
+function validateZarrTileSelect(layer, select) {
+  const source = layer.source ?? {};
+  const allowed = new Set([
+    ...Object.keys(source.select ?? {}),
+    ...Object.keys(source.selectors ?? {})
+  ]);
+  const normalized = {};
+  for (const [key, value] of Object.entries(select ?? {})) {
+    if (!allowed.has(key)) {
+      throw new Error(`Layer ${layer.id} does not define selector ${key}.`);
+    }
+    const index = Number(value);
+    if (!Number.isInteger(index)) {
+      throw new Error(`Selector ${key} must be an integer, got ${value}.`);
+    }
+    normalized[key] = index;
+  }
+  return normalized;
+}
+
 function zarrTileCachePath(root, manifest, layer, tile) {
   const source = layer.source ?? {};
   const cacheRoot = source.cacheDir
@@ -293,7 +325,7 @@ function zarrTileCachePath(root, manifest, layer, tile) {
     cacheRoot,
     safePathSegment(String(manifest.name ?? "dataset")),
     safePathSegment(String(layer.id ?? "layer")),
-    zarrTileCacheHash(manifest, layer),
+    zarrTileCacheHashForSelect(manifest, layer, tile.select ?? {}),
     `o${tile.order}`,
     `f${tile.face}`,
     `x${tile.x}`,
@@ -301,7 +333,7 @@ function zarrTileCachePath(root, manifest, layer, tile) {
   );
 }
 
-function zarrTileCacheHash(manifest, layer) {
+function zarrTileCacheHashForSelect(manifest, layer, select) {
   const descriptor = {
     schema: "hpxmap-zarr-tile-cache-v1",
     dataset: manifest.name ?? null,
@@ -312,9 +344,17 @@ function zarrTileCacheHash(manifest, layer) {
     manifestTileSize: manifest.tileSize ?? null,
     dtype: layer.dtype ?? null,
     quantization: layer.quantization ?? null,
+    select: effectiveZarrSelect(layer, select),
     source: layer.source ?? null
   };
   return createHash("sha256").update(stableJson(descriptor)).digest("hex").slice(0, 16);
+}
+
+function effectiveZarrSelect(layer, select) {
+  return {
+    ...(layer.source?.select ?? {}),
+    ...(select ?? {})
+  };
 }
 
 function stableJson(value) {

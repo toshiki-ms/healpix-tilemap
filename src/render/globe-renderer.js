@@ -2,6 +2,7 @@ import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { cellToNestedId } from "../core/healpix-nested.js";
 import { faceUvToVector, healpixVectorToDisplayVector, lonLatToVector, vectorToLonLat } from "../core/projection.js";
+import { tileLayerId } from "../data/layer-request.js";
 import { decodeSample } from "../data/tile-codec.js";
 import { decodeQuantizedTileWasm } from "../data/wasm-decoder.js";
 import {
@@ -883,6 +884,7 @@ export class GlobeRenderer {
       }
     }
 
+    const layerRequestId = tileLayerId(this.state, this.manifest);
     for (const targetTile of visibleTiles) {
       const key = tileKey(targetTile);
       let mesh = this.meshes.get(key);
@@ -891,7 +893,7 @@ export class GlobeRenderer {
         this.meshes.set(key, mesh);
         this.scene.add(mesh);
       }
-      const resolved = this.scheduler.resolve(this.state.layerId, targetTile);
+      const resolved = this.scheduler.resolve(layerRequestId, targetTile);
       updateRenderStats(stats, resolved, targetTile);
       const textureKey = this.updateMeshTexture(mesh, targetTile, resolved);
       if (textureKey) {
@@ -921,7 +923,7 @@ export class GlobeRenderer {
     return mesh;
   }
 
-  updateMeshTexture(mesh, targetTile, resolved = this.scheduler.resolve(this.state.layerId, targetTile)) {
+  updateMeshTexture(mesh, targetTile, resolved = this.scheduler.resolve(tileLayerId(this.state, this.manifest), targetTile)) {
     if (!resolved) {
       const material = this.ensureMeshMaterial(mesh, mesh.userData.materialKind ?? "float");
       updateScalarUniforms(material, this.state);
@@ -1167,7 +1169,7 @@ export class GlobeRenderer {
     const v = bounds.v0 + (bounds.v1 - bounds.v0) * uv.y;
     const cell = cellFromFaceUv(this.state.order, targetTile.face, u, v);
     const target = tileFromCell(cell, this.manifest.tileShift);
-    const resolved = this.scheduler.resolve(this.state.layerId, target);
+    const resolved = this.scheduler.resolve(tileLayerId(this.state, this.manifest), target);
     const sourceOrder = resolved?.sourceTile.order ?? this.state.order;
     const sourceNside = 2 ** sourceOrder;
     const sourceCell = {

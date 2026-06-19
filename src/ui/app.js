@@ -1,5 +1,12 @@
 import { loadManifest } from "../core/manifest.js";
 import { DirectoryTileSource } from "../data/directory-source.js";
+import {
+  defaultSelectorsForLayer,
+  normalizeSelectorsForLayer,
+  selectorSpecsForLayer,
+  selectorUrlParamsForState,
+  tileLayerId
+} from "../data/layer-request.js";
 import { TileCache } from "../data/tile-cache.js";
 import { TileScheduler } from "../data/tile-scheduler.js";
 import { warmWasmDecoder } from "../data/wasm-decoder.js";
@@ -27,6 +34,12 @@ export class App {
       loadStatus: document.querySelector("#loadStatus"),
       viewMode: document.querySelector("#viewMode"),
       layerSelect: document.querySelector("#layerSelect"),
+      timeField: document.querySelector("#timeSelectorField"),
+      timeLabel: document.querySelector("#timeSelectorLabel"),
+      timeSelect: document.querySelector("#timeSelect"),
+      levelField: document.querySelector("#levelSelectorField"),
+      levelLabel: document.querySelector("#levelSelectorLabel"),
+      levelSelect: document.querySelector("#levelSelect"),
       orderSelect: document.querySelector("#orderSelect"),
       colormapSelect: document.querySelector("#colormapSelect"),
       scaleSelect: document.querySelector("#scaleSelect"),
@@ -289,6 +302,7 @@ npm run dev</pre>
       ...this.manifest.layers.map((layer) => new Option(layer.title ?? layer.id, layer.id))
     );
     this.controls.layerSelect.value = this.state.layerId;
+    this.updateSelectorControls();
 
     const minOrder = this.manifest.minOrder ?? this.manifest.tileShift;
     this.controls.orderSelect.replaceChildren();
@@ -363,10 +377,14 @@ npm run dev</pre>
     });
     this.controls.layerSelect.addEventListener("change", () => {
       this.state.layerId = this.controls.layerSelect.value;
+      this.state.selectors = defaultSelectorsForLayer(this.manifest, this.state.layerId);
+      this.updateSelectorControls();
       this.autoStretch();
       this.copyColorScaleToOtherPanes(this.activePane(), { includeLayer: true });
       this.writeUrlState();
     });
+    this.controls.timeSelect.addEventListener("change", () => this.setSelectorValue("time", this.controls.timeSelect.value));
+    this.controls.levelSelect.addEventListener("change", () => this.setSelectorValue("level", this.controls.levelSelect.value));
     this.controls.orderSelect.addEventListener("change", () => {
       this.state.maxOrder = Number(this.controls.orderSelect.value);
       const minOrder = this.manifest.minOrder ?? this.manifest.tileShift;
@@ -693,6 +711,7 @@ npm run dev</pre>
       }
       this.assignResourceToPane(pane, sourcePane.resource, {
         layerId: sourcePane.state.layerId,
+        selectors: { ...(sourcePane.state.selectors ?? {}) },
         min: sourcePane.state.min,
         max: sourcePane.state.max,
         relief: sourcePane.state.relief,
@@ -707,6 +726,18 @@ npm run dev</pre>
     }
   }
 
+  copySelectorsToLinkedDatasetPanes(sourcePane) {
+    if (!this.linkDataset) {
+      return;
+    }
+    for (const pane of this.panes) {
+      if (pane === sourcePane || pane.datasetId !== sourcePane.datasetId || pane.state.layerId !== sourcePane.state.layerId) {
+        continue;
+      }
+      pane.state.selectors = normalizeSelectorsForLayer(sourcePane.state.selectors, pane.manifest, pane.state.layerId);
+    }
+  }
+
   copyColorScaleToOtherPanes(sourcePane, { includeLayer = false } = {}) {
     if (!this.linkColorScale) {
       return;
@@ -717,6 +748,7 @@ npm run dev</pre>
       }
       if (includeLayer && pane.manifest.layers.some((layer) => layer.id === sourcePane.state.layerId)) {
         pane.state.layerId = sourcePane.state.layerId;
+        pane.state.selectors = normalizeSelectorsForLayer(sourcePane.state.selectors, pane.manifest, pane.state.layerId);
       }
       pane.state.colormap = sourcePane.state.colormap;
       pane.state.scale = sourcePane.state.scale;
@@ -916,7 +948,9 @@ npm run dev</pre>
     const layerChanged = typeof nextLayerId === "string" && nextLayerId !== this.state.layerId;
     if (layerChanged && this.manifest.layers.some((item) => item.id === nextLayerId)) {
       this.state.layerId = nextLayerId;
+      this.state.selectors = defaultSelectorsForLayer(this.manifest, this.state.layerId);
     }
+    this.applySelectorPatch(patch);
     if (patch.view === "globe" || patch.view === "net") {
       this.state.view = patch.view;
       this.root.dataset.view = this.state.view;
@@ -986,6 +1020,20 @@ npm run dev</pre>
     }
   }
 
+  applySelectorPatch(patch = {}) {
+    const selectors = {
+      ...(this.state.selectors ?? {}),
+      ...(patch.selectors && typeof patch.selectors === "object" ? patch.selectors : {})
+    };
+    if (patch.time !== undefined) {
+      selectors.time = patch.time;
+    }
+    if (patch.level !== undefined) {
+      selectors.level = patch.level;
+    }
+    this.state.selectors = normalizeSelectorsForLayer(selectors, this.manifest, this.state.layerId);
+  }
+
   stateSnapshot() {
     return {
       datasetId: this.datasetId,
@@ -1023,7 +1071,7 @@ npm run dev</pre>
         schedulerRequests.set(pane.scheduler, []);
       }
       schedulerRequests.get(pane.scheduler).push({
-        layerId: pane.state.layerId,
+        layerId: tileLayerId(pane.state, pane.manifest),
         targetTiles: visible
       });
     }
@@ -1050,6 +1098,7 @@ npm run dev</pre>
     if (layer && this.manifest.layers.some((item) => item.id === layer)) {
       this.state.layerId = layer;
     }
+    this.state.selectors = selectorsFromUrlParams(params, this.manifest, this.state.layerId, "");
     const view = params.get("view");
     if (view === "globe" || view === "net") {
       this.state.view = view;
@@ -1134,6 +1183,9 @@ npm run dev</pre>
     params.set("pane", this.activePaneId);
     params.set("dataset", basePane.datasetId);
     params.set("layer", basePane.state.layerId);
+    for (const [key, value] of selectorUrlParamsForState(basePane.state, basePane.manifest)) {
+      params.set(key, String(value));
+    }
     params.set("view", basePane.state.view);
     params.set("order", String(basePane.state.maxOrder));
     params.set("cmap", basePane.state.colormap);
@@ -1161,6 +1213,9 @@ npm run dev</pre>
     if (right && this.splitMode !== "single") {
       params.set("rightDataset", right.datasetId);
       params.set("rightLayer", right.state.layerId);
+      for (const [key, value] of selectorUrlParamsForState(right.state, right.manifest)) {
+        params.set(`right${capitalize(key)}`, String(value));
+      }
       params.set("rightView", right.state.view);
       params.set("rightOrder", String(right.state.maxOrder));
       params.set("rightCmap", right.state.colormap);
@@ -1194,6 +1249,7 @@ npm run dev</pre>
       ...this.manifest.layers.map((layer) => new Option(layer.title ?? layer.id, layer.id))
     );
     this.controls.layerSelect.value = this.state.layerId;
+    this.updateSelectorControls();
     const minOrder = this.manifest.minOrder ?? this.manifest.tileShift;
     this.controls.orderSelect.replaceChildren();
     for (let order = minOrder; order <= this.manifest.maxOrder; order += 1) {
@@ -1221,6 +1277,42 @@ npm run dev</pre>
     this.updateColorbar();
     this.updateViewPanel(true);
     this.updateScaleBar();
+  }
+
+  setSelectorValue(id, value) {
+    const next = { ...(this.state.selectors ?? {}), [id]: value };
+    this.state.selectors = normalizeSelectorsForLayer(next, this.manifest, this.state.layerId);
+    this.copySelectorsToLinkedDatasetPanes(this.activePane());
+    this.writeUrlState();
+    this.updateDisplayControls();
+  }
+
+  updateSelectorControls() {
+    const specs = selectorSpecsForLayer(this.manifest, this.state.layerId);
+    this.state.selectors = normalizeSelectorsForLayer(this.state.selectors, this.manifest, this.state.layerId);
+    this.updateOneSelectorControl("time", specs.find((spec) => spec.id === "time"));
+    this.updateOneSelectorControl("level", specs.find((spec) => spec.id === "level"));
+  }
+
+  updateOneSelectorControl(id, spec) {
+    const field = id === "time" ? this.controls.timeField : this.controls.levelField;
+    const label = id === "time" ? this.controls.timeLabel : this.controls.levelLabel;
+    const select = id === "time" ? this.controls.timeSelect : this.controls.levelSelect;
+    if (!field || !select || !label) {
+      return;
+    }
+    if (!spec) {
+      field.hidden = true;
+      select.disabled = true;
+      select.replaceChildren();
+      return;
+    }
+    field.hidden = false;
+    select.disabled = false;
+    label.textContent = spec.label;
+    const current = this.state.selectors?.[id] ?? spec.defaultValue;
+    select.replaceChildren(...spec.values.map((item) => new Option(item.label, item.value)));
+    select.value = String(current);
   }
 
   syncToolbarCheckStyles() {
@@ -1312,6 +1404,7 @@ npm run dev</pre>
       paneId: pane.id,
       datasetId: pane.datasetId,
       layerId: pane.state.layerId,
+      selectors: { ...(pane.state.selectors ?? {}) },
       view: pane.state.view,
       order: pane.state.maxOrder,
       colormap: pane.state.colormap,
@@ -1462,6 +1555,7 @@ npm run dev</pre>
     const args = [
       pythonLiteral(leftState.datasetId),
       `layer=${pythonLiteral(leftState.layerId)}`,
+      ...pythonSelectorArgs(leftState),
       `view=${pythonLiteral(leftState.view)}`,
       `order=${leftState.order}`,
       `cmap=${pythonLiteral(leftState.colormap)}`,
@@ -1496,6 +1590,7 @@ npm run dev</pre>
       extra.push(
         `rightDataset=${pythonLiteral(rightState.datasetId)}`,
         `rightLayer=${pythonLiteral(rightState.layerId)}`,
+        ...pythonSelectorArgs(rightState, "right"),
         `rightView=${pythonLiteral(rightState.view)}`,
         `rightOrder=${rightState.order}`,
         `rightCmap=${pythonLiteral(rightState.colormap)}`,
@@ -1715,6 +1810,8 @@ npm run dev</pre>
         id: pane.id,
         datasetId: pane.datasetId,
         layerId: pane.state.layerId,
+        selectors: { ...(pane.state.selectors ?? {}) },
+        tileLayerId: tileLayerId(pane.state, pane.manifest),
         view: pane.state.view,
         order: pane.state.order,
         maxOrder: pane.state.maxOrder,
@@ -1805,6 +1902,7 @@ function defaultViewerState() {
   return {
     view: "net",
     layerId: "",
+    selectors: {},
     order: null,
     maxOrder: null,
     colormap: "viridis",
@@ -1836,6 +1934,7 @@ function stateForManifest(manifest, overrides = {}) {
       ? defaultLayer
       : manifest.layers[0]?.id ?? "";
   }
+  state.selectors = normalizeSelectorsForLayer(state.selectors, manifest, state.layerId);
   state.view = state.view === "globe" || state.view === "net"
     ? state.view
     : manifest.defaultView?.mode ?? "net";
@@ -1983,6 +2082,7 @@ function applyPrefixedUrlState(state, manifest, prefix) {
   if (layer && manifest.layers.some((item) => item.id === layer)) {
     state.layerId = layer;
   }
+  state.selectors = selectorsFromUrlParams(params, manifest, state.layerId, prefix);
   const view = get("View");
   if (view === "globe" || view === "net") {
     state.view = view;
@@ -2016,6 +2116,33 @@ function applyPrefixedUrlState(state, manifest, prefix) {
   }
 }
 
+function selectorsFromUrlParams(params, manifest, layerId, prefix) {
+  const selectors = {};
+  for (const spec of selectorSpecsForLayer(manifest, layerId)) {
+    const value = params.get(selectorParamName(prefix, spec.id));
+    if (value !== null) {
+      selectors[spec.id] = value;
+    }
+  }
+  return normalizeSelectorsForLayer(selectors, manifest, layerId);
+}
+
+function selectorParamName(prefix, id) {
+  return prefix ? `${prefix}${capitalize(id)}` : id;
+}
+
+function capitalize(value) {
+  const text = String(value ?? "");
+  return text ? `${text[0].toUpperCase()}${text.slice(1)}` : "";
+}
+
+function pythonSelectorArgs(state, prefix = "") {
+  return Object.entries(state.selectors ?? {}).map(([key, value]) => {
+    const name = prefix ? `${prefix}${capitalize(key)}` : key;
+    return `${name}=${pythonLiteral(value)}`;
+  });
+}
+
 function serializeSelection(sample, app) {
   const base = {
     type: "hpxviewer:selected",
@@ -2023,6 +2150,7 @@ function serializeSelection(sample, app) {
     paneId: app.activePaneId,
     datasetId: app.datasetId,
     layerId: app.state.layerId,
+    selectors: { ...(app.state.selectors ?? {}) },
     view: app.state.view,
     order: app.state.order,
     maxOrder: app.state.maxOrder,

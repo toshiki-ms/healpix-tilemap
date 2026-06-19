@@ -172,10 +172,11 @@ Static tile pyramids are best when the same 2D map will be viewed repeatedly.
 For future 3D workflows with many times or vertical levels, writing a complete
 tile pyramid for every slice can be too expensive. A `zarr-tile` layer lets
 the viewer request one tile from a Zarr v3 array. The local Node/Vite server
-generates the `.bin` tile on cache miss and stores it under:
+generates the `.bin` tile on cache miss and stores it under a path keyed by the
+source configuration and the selected time/level:
 
 ```text
-cache/zarr-tiles/<dataset-id>/<layer-id>/<source-hash>/o<order>/f<face>/x<x>/y<y>.bin
+cache/zarr-tiles/<dataset-id>/<layer-id>/<source-and-select-hash>/o<order>/f<face>/x<x>/y<y>.bin
 ```
 
 The first request for a tile performs Zarr I/O and downsampling. Later requests
@@ -198,6 +199,8 @@ pip install -e "python[array,mpi]"
 mpirun -n 32 python3 tools/prefill_zarr_tile_cache.py \
   --manifest public/datasets/my-zarr-cache/manifest.json \
   --layer-id temperature \
+  --select time=0 \
+  --select level=12 \
   --min-order 11 \
   --max-order 13
 ```
@@ -216,7 +219,8 @@ face-local Zarr array:
 
 `face` has length 12, and `y`/`x` are the native face grid at
 `nside = 2**maxOrder`. Extra axes such as `time`, `level`, or `sigma` are fixed
-by `source.select` in the manifest. Chunk the array so tile requests can read
+by `source.select` by default. To let users switch slices in the browser, expose
+those axes with `source.selectors`. Chunk the array so tile requests can read
 compact rectangles, for example `(1, 1, 1, 256, 256)` for nside 8192 data.
 
 Minimal `zarr-tile` layer manifest:
@@ -234,10 +238,32 @@ Minimal `zarr-tile` layer manifest:
     "array": "temperature",
     "dims": ["time", "level", "face", "y", "x"],
     "select": { "time": 0, "level": 12 },
+    "selectors": {
+      "time": {
+        "label": "Time",
+        "values": [
+          { "value": 0, "label": "t=0" },
+          { "value": 1, "label": "t=1" }
+        ],
+        "default": 0
+      },
+      "level": {
+        "label": "Level",
+        "values": [
+          { "value": 0, "label": "surface" },
+          { "value": 12, "label": "level 12" }
+        ],
+        "default": 12
+      }
+    },
     "maxReadCells": 4194304
   }
 }
 ```
+
+The viewer writes selected slices into the URL as `time=...&level=...`. In split
+mode the right/bottom pane uses `rightTime=...&rightLevel=...`, so the two panes
+can compare different slices of the same variable.
 
 Generate a small local demo that uses Zarr-backed cache filling rather than
 prewritten tiles:
@@ -252,7 +278,9 @@ Open `zarr-tile-demo` in the dataset menu. To warm its cache with MPI:
 ```sh
 mpirun -n 4 python3 tools/prefill_zarr_tile_cache.py \
   --manifest public/datasets/zarr-tile-demo/manifest.json \
-  --layer-id value
+  --layer-id value \
+  --select time=0 \
+  --select level=0
 ```
 
 The offline converter still supports the preferred `(..., block, cell)` layout

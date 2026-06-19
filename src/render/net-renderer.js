@@ -1,4 +1,5 @@
 import { cellToNestedId } from "../core/healpix-nested.js";
+import { tileLayerId } from "../data/layer-request.js";
 import {
   faceUvToNet,
   faceUvToVector,
@@ -126,8 +127,9 @@ export class NetRenderer {
     ctx.fillStyle = "#202326";
     ctx.fillRect(0, 0, rect.width, rect.height);
 
+    const layerRequestId = tileLayerId(this.state, this.manifest);
     for (const targetTile of this.visibleTiles) {
-      const resolved = this.scheduler.resolve(this.state.layerId, targetTile);
+      const resolved = this.scheduler.resolve(layerRequestId, targetTile);
       updateRenderStats(this.renderStats, resolved, targetTile);
       if (!resolved) {
         this.drawTilePlaceholder(targetTile);
@@ -265,7 +267,7 @@ export class NetRenderer {
     }
     const cell = cellFromFaceUv(this.state.order, faceUv.face, faceUv.u, faceUv.v);
     const targetTile = tileFromCell(cell, this.manifest.tileShift);
-    const resolved = this.scheduler.resolve(this.state.layerId, targetTile);
+    const resolved = this.scheduler.resolve(tileLayerId(this.state, this.manifest), targetTile);
     const sourceNside = resolved ? 2 ** resolved.sourceTile.order : 1;
     const sourceCell = resolved
       ? {

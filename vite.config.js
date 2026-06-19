@@ -102,6 +102,7 @@ class ZarrTileService {
     this.inflight = new Map();
     this.queue = [];
     this.active = 0;
+    this.manifestCache = new Map();
     const defaultWorkers = Math.max(1, Math.min(4, cpus().length || 1));
     this.workers = positiveInt(process.env.HPX_ZARR_TILE_WORKERS, defaultWorkers);
   }

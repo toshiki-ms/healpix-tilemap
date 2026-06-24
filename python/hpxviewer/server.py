@@ -47,7 +47,12 @@ def start_viewer(port: int = 4181, host: str = "127.0.0.1", *, timeout: float = 
         stderr=subprocess.DEVNULL,
     )
     _SERVER = ViewerServer(url=url, process=process)
-    _wait_for_server(url, timeout)
+    try:
+        _wait_for_server(url, timeout, process=process)
+    except Exception:
+        _SERVER.stop()
+        _SERVER = None
+        raise
     return _SERVER
 
 
@@ -58,9 +63,11 @@ def stop_viewer() -> None:
     _SERVER = None
 
 
-def _wait_for_server(url: str, timeout: float) -> None:
+def _wait_for_server(url: str, timeout: float, process: subprocess.Popen[str] | None = None) -> None:
     started = time.monotonic()
     while time.monotonic() - started < timeout:
+        if process is not None and process.poll() is not None:
+            raise RuntimeError(f"Viewer server process exited prematurely with code {process.returncode}.")
         if _is_serving(url):
             return
         time.sleep(0.25)

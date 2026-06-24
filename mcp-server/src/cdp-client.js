@@ -116,6 +116,8 @@ export class ChromeViewerSession {
     ].filter(Boolean);
     this.chrome = spawn(executable, args, { stdio: ["ignore", "pipe", "pipe"] });
     let wsUrl = "";
+    let browserStartError = null;
+    let browserExit = null;
     const collect = (chunk) => {
       const text = String(chunk);
       process.stderr.write(text);
@@ -126,7 +128,23 @@ export class ChromeViewerSession {
     };
     this.chrome.stdout.on("data", collect);
     this.chrome.stderr.on("data", collect);
-    await waitFor(() => wsUrl, options.timeoutMs ?? 10_000, "Chrome DevTools endpoint");
+    this.chrome.on("error", (err) => {
+      browserStartError = err;
+    });
+    this.chrome.on("exit", (code, signal) => {
+      if (!wsUrl && !this.cdp) {
+        browserExit = { code, signal };
+      }
+    });
+    await waitFor(() => {
+      if (browserStartError) {
+        throw new Error(`Failed to start Chrome: ${browserStartError.message}`);
+      }
+      if (browserExit) {
+        throw new Error(`Chrome exited before DevTools endpoint was available (${formatExit(browserExit)}).`);
+      }
+      return wsUrl;
+    }, options.timeoutMs ?? 10_000, "Chrome DevTools endpoint");
     this.cdp = await connectCdp(wsUrl);
   }
 
@@ -146,8 +164,8 @@ class CdpConnection {
     this.ws = ws;
     this.nextId = 1;
     this.pending = new Map();
-    ws.addEventListener("message", (event) => {
-      const message = JSON.parse(event.data);
+    addSocketListener(ws, "message", (event) => {
+      const message = JSON.parse(socketMessageData(event));
       const callbacks = this.pending.get(message.id);
       if (!callbacks) {
         return;
@@ -179,12 +197,47 @@ class CdpConnection {
 }
 
 async function connectCdp(endpoint) {
-  const ws = new WebSocket(endpoint);
+  const WebSocketClient = await webSocketConstructor();
+  const ws = new WebSocketClient(endpoint);
   await new Promise((resolve, reject) => {
-    ws.addEventListener("open", resolve, { once: true });
-    ws.addEventListener("error", reject, { once: true });
+    addSocketListener(ws, "open", resolve, { once: true });
+    addSocketListener(ws, "error", reject, { once: true });
   });
   return new CdpConnection(ws);
+}
+
+async function webSocketConstructor() {
+  if (typeof globalThis.WebSocket !== "undefined") {
+    return globalThis.WebSocket;
+  }
+  const wsModule = await import("ws");
+  return wsModule.WebSocket ?? wsModule.default;
+}
+
+function addSocketListener(ws, event, listener, options = {}) {
+  if (typeof ws.addEventListener === "function") {
+    ws.addEventListener(event, listener, options);
+    return;
+  }
+  const wrapped = event === "message" ? (data) => listener({ data }) : listener;
+  if (options.once && typeof ws.once === "function") {
+    ws.once(event, wrapped);
+    return;
+  }
+  if (typeof ws.on === "function") {
+    ws.on(event, wrapped);
+    return;
+  }
+  throw new Error("WebSocket implementation does not support event listeners.");
+}
+
+function socketMessageData(event) {
+  const data = event?.data ?? event;
+  return Buffer.isBuffer(data) ? data.toString("utf8") : String(data);
+}
+
+function formatExit(exit) {
+  return exit.signal ? `signal ${exit.signal}` : `code ${exit.code}`;
 }
 
 async function findChromeExecutable(requested) {
@@ -209,6 +262,7 @@ async function findChromeExecutable(requested) {
 function commandExists(command) {
   return new Promise((resolve) => {
     const child = spawn("sh", ["-lc", `command -v ${JSON.stringify(command)}`], { stdio: "ignore" });
+    child.on("error", () => resolve(false));
     child.on("exit", (code) => resolve(code === 0));
   });
 }

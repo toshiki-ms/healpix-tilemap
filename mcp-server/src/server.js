@@ -292,6 +292,9 @@ function runCommand(command, args, options) {
     child.stderr.on("data", (chunk) => {
       stderr += String(chunk);
     });
+    child.on("error", (err) => {
+      reject(new Error(`Failed to run ${command}: ${err.message}`));
+    });
     child.on("exit", (code) => {
       const result = { command: [command, ...args], exitCode: code, stdout, stderr };
       if (code === 0) {

@@ -129,7 +129,8 @@ class Viewer:
     def selection(self, *, timeout: float | None = None, interval: float = 0.25) -> dict | None:
         """Return the last point or right-drag tile selection in the viewer.
 
-        If ``timeout`` is set, wait until a selection is available or the timeout
+        If ``timeout`` is ``None``, wait indefinitely until a selection is
+        available. Otherwise, wait until a selection is available or the timeout
         expires. The viewer server must be reachable from the kernel at
         ``server_host:server_port``.
         """
@@ -137,9 +138,9 @@ class Viewer:
         started = time.monotonic()
         while True:
             selection = self._request_selection("GET")
-            if selection is not None or timeout is None:
+            if selection is not None:
                 return selection
-            if time.monotonic() - started >= timeout:
+            if timeout is not None and time.monotonic() - started >= timeout:
                 return None
             time.sleep(interval)
 

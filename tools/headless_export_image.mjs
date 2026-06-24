@@ -45,6 +45,10 @@ async function main() {
     `--user-data-dir=${userDataDir}`,
     "about:blank"
   ], { stdio: "ignore" });
+  chrome.on("error", (err) => {
+    console.error(`Failed to start Chrome: ${err.message}`);
+    process.exit(1);
+  });
 
   let browser;
   let page;
@@ -266,12 +270,13 @@ async function fetchJson(url, timeoutMs) {
   throw lastError ?? new Error(`Timed out fetching ${url}.`);
 }
 
-function connectCdp(wsUrl) {
+async function connectCdp(wsUrl) {
+  const WebSocketClient = await webSocketConstructor();
   return new Promise((resolve, reject) => {
-    const ws = new WebSocket(wsUrl);
+    const ws = new WebSocketClient(wsUrl);
     let id = 0;
     const pending = new Map();
-    ws.addEventListener("open", () => {
+    addSocketListener(ws, "open", () => {
       resolve({
         send(method, params = {}) {
           const messageId = ++id;
@@ -285,8 +290,8 @@ function connectCdp(wsUrl) {
         }
       });
     });
-    ws.addEventListener("message", (event) => {
-      const payload = JSON.parse(event.data);
+    addSocketListener(ws, "message", (event) => {
+      const payload = JSON.parse(socketMessageData(event));
       if (!payload.id || !pending.has(payload.id)) {
         return;
       }
@@ -294,8 +299,38 @@ function connectCdp(wsUrl) {
       pending.delete(payload.id);
       payload.error ? reject(new Error(payload.error.message)) : resolve(payload.result);
     });
-    ws.addEventListener("error", reject);
+    addSocketListener(ws, "error", reject);
   });
+}
+
+async function webSocketConstructor() {
+  if (typeof globalThis.WebSocket !== "undefined") {
+    return globalThis.WebSocket;
+  }
+  const wsModule = await import("ws");
+  return wsModule.WebSocket ?? wsModule.default;
+}
+
+function addSocketListener(ws, event, listener, options = {}) {
+  if (typeof ws.addEventListener === "function") {
+    ws.addEventListener(event, listener, options);
+    return;
+  }
+  const wrapped = event === "message" ? (data) => listener({ data }) : listener;
+  if (options.once && typeof ws.once === "function") {
+    ws.once(event, wrapped);
+    return;
+  }
+  if (typeof ws.on === "function") {
+    ws.on(event, wrapped);
+    return;
+  }
+  throw new Error("WebSocket implementation does not support event listeners.");
+}
+
+function socketMessageData(event) {
+  const data = event?.data ?? event;
+  return Buffer.isBuffer(data) ? data.toString("utf8") : String(data);
 }
 
 async function waitForViewer(page, timeoutMs) {

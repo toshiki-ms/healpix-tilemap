@@ -106,10 +106,12 @@ def generate_zarr_tile(
     output: Path,
     select: dict[str, Any] | None = None,
     force: bool = False,
+    manifest: dict[str, Any] | None = None,
 ) -> Path:
     if output.exists() and not force:
         return output
-    manifest = load_manifest(manifest_path)
+    if manifest is None:
+        manifest = load_manifest(manifest_path)
     layer = zarr_tile_layer(manifest, layer_id)
     validate_tile_address(manifest, order, face, x, y)
 
